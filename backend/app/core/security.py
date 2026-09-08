@@ -26,16 +26,16 @@ def create_access_token(data: Dict[str, Any], expires_delta: Optional[datetime.t
     if expires_delta:
         expire = now + expires_delta
     else:
-        expire = now + datetime.timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES if hasattr(settings, 'ACCESS_TOKEN_EXPIRE_MINUTES') else 1440)
+        expire = now + datetime.timedelta(minutes=getattr(settings, 'JWT_EXPIRE_MINUTES', 1440))
     to_encode.update({"exp": expire, "iat": now})
-    secret = getattr(settings, 'JWT_SECRET_KEY', 'skillforge_super_secret_jwt_key_2026')
+    secret = settings.SECRET_KEY
     algorithm = getattr(settings, 'JWT_ALGORITHM', 'HS256')
     return jwt.encode(to_encode, secret, algorithm=algorithm)
 
 def decode_access_token(token: str) -> Optional[Dict[str, Any]]:
     """Decode and validate a JWT access token."""
     try:
-        secret = getattr(settings, 'JWT_SECRET_KEY', 'skillforge_super_secret_jwt_key_2026')
+        secret = settings.SECRET_KEY
         algorithm = getattr(settings, 'JWT_ALGORITHM', 'HS256')
         payload = jwt.decode(token, secret, algorithms=[algorithm])
         return payload
@@ -54,7 +54,7 @@ def generate_otp() -> str:
 
 def hash_otp(otp: str) -> str:
     """Hash an OTP using HMAC-SHA256 with server-side OTP_HASH_SECRET."""
-    secret = os.getenv("OTP_HASH_SECRET", "skillforge_default_otp_hash_secret_key_2026").strip()
+    secret = settings.OTP_HASH_SECRET or "dev-otp-secret-change-in-prod"
     return hmac.new(secret.encode('utf-8'), otp.strip().encode('utf-8'), hashlib.sha256).hexdigest()
 
 def verify_otp_hash(plain_otp: str, hashed_otp: str) -> bool:

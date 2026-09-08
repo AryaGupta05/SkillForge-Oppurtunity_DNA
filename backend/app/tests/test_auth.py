@@ -33,6 +33,7 @@ client = TestClient(app)
 
 @pytest.fixture(autouse=True)
 def setup_database(monkeypatch):
+    app.dependency_overrides[get_db] = override_get_db
     monkeypatch.setenv("EMAIL_PROVIDER", "dev")
     Base.metadata.create_all(bind=engine)
     yield

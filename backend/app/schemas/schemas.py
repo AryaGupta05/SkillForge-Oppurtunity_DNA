@@ -137,6 +137,18 @@ class OpportunityBase(BaseModel):
 class OpportunityCreate(OpportunityBase):
     required_skills: List[OpportunitySkillCreate] = []
 
+class OpportunityUpdate(BaseModel):
+    title: Optional[str] = None
+    company: Optional[str] = None
+    description: Optional[str] = None
+    type: Optional[str] = None
+    duration_months: Optional[int] = None
+    stipend: Optional[float] = None
+    location: Optional[str] = None
+    sector: Optional[str] = None
+    allowed_streams: Optional[str] = None
+    required_skills: Optional[List[OpportunitySkillCreate]] = None
+
 class OpportunityResponse(OpportunityBase):
     id: int
     created_at: datetime
@@ -446,6 +458,18 @@ class InstitutionDashboardResponse(BaseModel):
     internship_application_stats: Optional[dict] = Field(default_factory=dict)
     placement_application_stats: Optional[dict] = Field(default_factory=dict)
     avg_match_readiness: Optional[float] = 0.0
+
+
+class IndustryDashboardResponse(BaseModel):
+    company_name: str
+    total_opportunities: int
+    total_applications: int
+    shortlisted_count: int
+    offered_count: int
+    placed_count: int
+    rejected_count: int
+    application_stats: dict  # {applied, shortlisted, offered, placed, rejected, total}
+    recent_applications: List[ApplicationResponse]
 
 
 # --- SIH26044: AUTHENTICATION & USER SCHEMAS ---

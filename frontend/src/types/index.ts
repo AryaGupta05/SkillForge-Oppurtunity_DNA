@@ -463,6 +463,18 @@ export interface InstitutionDashboardResponse {
   avg_match_readiness?: number;
 }
 
+export interface IndustryDashboardResponse {
+  company_name: string;
+  total_opportunities: number;
+  total_applications: number;
+  shortlisted_count: number;
+  offered_count: number;
+  placed_count: number;
+  rejected_count: number;
+  application_stats: Record<string, number>;
+  recent_applications: Application[];
+}
+
 // --- PHASE 3: GITHUB REPOSITORY EVIDENCE INGESTION TYPES ---
 
 export interface GitHubAnalyzeRequest {

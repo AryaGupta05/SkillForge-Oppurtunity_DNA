@@ -53,16 +53,24 @@ export const IndustryOpportunities: React.FC<IndustryOpportunitiesProps> = ({
                   <p className="text-xs text-slate-600">{opp.company} • {opp.location}</p>
                 </div>
 
-                <button
-                  onClick={() => {
-                    onLoadRankings(opp.id);
-                    navigate('/industry/applicants');
-                  }}
-                  className="bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs px-4 py-2 rounded-xl transition-all shadow-sm flex items-center space-x-2 shrink-0"
-                >
-                  <Users className="w-4 h-4 text-emerald-400" />
-                  <span>View Applicants</span>
-                </button>
+                <div className="flex items-center space-x-2 shrink-0">
+                  <button
+                    onClick={() => navigate(`/industry/opportunities/${opp.id}/edit`)}
+                    className="bg-white hover:bg-slate-50 border border-slate-300 text-slate-700 font-bold text-xs px-3 py-2 rounded-xl transition-all shadow-sm"
+                  >
+                    Edit Opportunity
+                  </button>
+                  <button
+                    onClick={() => {
+                      onLoadRankings(opp.id);
+                      navigate('/industry/applicants');
+                    }}
+                    className="bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs px-4 py-2 rounded-xl transition-all shadow-sm flex items-center space-x-2"
+                  >
+                    <Users className="w-4 h-4 text-emerald-400" />
+                    <span>View Applicants</span>
+                  </button>
+                </div>
               </div>
 
               {opp.description && (
@@ -71,13 +79,20 @@ export const IndustryOpportunities: React.FC<IndustryOpportunitiesProps> = ({
                 </p>
               )}
 
-              <div className="flex flex-wrap gap-4 text-xs pt-2 text-slate-600">
-                <span className="font-semibold text-slate-800">
-                  Compensation: Rs. {opp.stipend?.toLocaleString() || 15000} / month
-                </span>
-                {opp.allowed_streams && (
-                  <span className="text-slate-500">
-                    Streams: <strong className="text-slate-700">{opp.allowed_streams}</strong>
+              <div className="flex flex-wrap items-center justify-between gap-4 text-xs pt-2 text-slate-600 border-t border-slate-100">
+                <div className="flex flex-wrap items-center gap-4">
+                  <span className="font-semibold text-slate-800">
+                    Compensation: Rs. {opp.stipend?.toLocaleString() || 0} / month
+                  </span>
+                  {opp.allowed_streams && (
+                    <span className="text-slate-500">
+                      Streams: <strong className="text-slate-700">{opp.allowed_streams}</strong>
+                    </span>
+                  )}
+                </div>
+                {opp.required_skills && (
+                  <span className="text-[11px] font-bold bg-slate-100 text-slate-700 px-2.5 py-1 rounded-lg">
+                    {opp.required_skills.length} Required Skills
                   </span>
                 )}
               </div>

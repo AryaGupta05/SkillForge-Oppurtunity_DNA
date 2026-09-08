@@ -120,13 +120,9 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# CORS configurations for local frontend development (Vite runs on port 5173 by default)
-origins = [
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-    "http://localhost:3000",
-    "*"  # Accept all for hackathon environment flexibility
-]
+# CORS configurations (Production origins loaded from settings)
+cors_origins_raw = getattr(settings, "CORS_ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000")
+origins = [o.strip() for o in cors_origins_raw.split(",") if o.strip()]
 
 app.add_middleware(
     CORSMiddleware,

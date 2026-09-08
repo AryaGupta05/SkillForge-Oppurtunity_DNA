@@ -1,36 +1,65 @@
-import React, { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { ArrowLeft, AlertCircle } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
+import { ArrowLeft, Sparkles, AlertCircle } from 'lucide-react';
 import { api, normalizeApiError } from '../../services/api';
-import type { Skill, UserResponse } from '../../types';
+import type { Skill, Opportunity } from '../../types';
 
-interface PostOpportunityProps {
+interface EditOpportunityProps {
   skillsCatalog: Skill[];
-  currentUser?: UserResponse | null;
-  onCreateSuccess: () => void;
+  opportunities: Opportunity[];
+  onUpdateSuccess: () => Promise<void>;
 }
 
-export const PostOpportunity: React.FC<PostOpportunityProps> = ({
+export const EditOpportunity: React.FC<EditOpportunityProps> = ({
   skillsCatalog,
-  currentUser,
-  onCreateSuccess
+  opportunities,
+  onUpdateSuccess
 }) => {
   const navigate = useNavigate();
+  const { id } = useParams<{ id: string }>();
+  const oppId = Number(id);
 
+  const [opportunity, setOpportunity] = useState<Opportunity | null>(null);
   const [title, setTitle] = useState('');
-  const [company, setCompany] = useState(currentUser?.company || '');
-  const [type, setType] = useState<'internship' | 'placement'>('internship');
+  const [company, setCompany] = useState('');
+  const [type, setType] = useState<'internship' | 'placement' | 'project'>('internship');
   const [duration, setDuration] = useState<number>(6);
   const [stipend, setStipend] = useState<number>(15000);
   const [location, setLocation] = useState('');
-  const [sector, setSector] = useState('IT & Software');
-  const [streams, setStreams] = useState('B.Tech, MCA, Data Science');
+  const [sector, setSector] = useState('');
+  const [streams, setStreams] = useState('');
   const [description, setDescription] = useState('');
 
   const [selectedSkillId, setSelectedSkillId] = useState<number | ''>('');
   const [reqSkills, setReqSkills] = useState<{ skill_id: number; skill_name: string; importance: number; required_level: string }[]>([]);
   const [loading, setLoading] = useState(false);
+  const [analyzingJob, setAnalyzingJob] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    const opp = opportunities.find(o => o.id === oppId);
+    if (opp) {
+      setOpportunity(opp);
+      setTitle(opp.title || '');
+      setCompany(opp.company || '');
+      setType(opp.type || 'internship');
+      setDuration(opp.duration_months || 6);
+      setStipend(opp.stipend || 0);
+      setLocation(opp.location || '');
+      setSector(opp.sector || '');
+      setStreams(opp.allowed_streams || '');
+      setDescription(opp.description || '');
+
+      if (opp.required_skills) {
+        setReqSkills(opp.required_skills.map(rs => ({
+          skill_id: rs.skill_id,
+          skill_name: rs.skill?.name || `Skill #${rs.skill_id}`,
+          importance: rs.importance || 1.0,
+          required_level: rs.required_level || 'Intermediate'
+        })));
+      }
+    }
+  }, [oppId, opportunities]);
 
   const handleAddSkill = () => {
     if (!selectedSkillId) return;
@@ -43,6 +72,31 @@ export const PostOpportunity: React.FC<PostOpportunityProps> = ({
 
   const handleRemoveSkill = (skillId: number) => {
     setReqSkills(reqSkills.filter(s => s.skill_id !== skillId));
+  };
+
+  const handleAnalyzeJobDescription = async () => {
+    if (!description || !description.trim()) {
+      setErrorMsg("Please enter a position description to analyze required skills.");
+      return;
+    }
+
+    setAnalyzingJob(true);
+    setErrorMsg(null);
+    try {
+      const extractedReqs = await api.analyzeOpportunity(oppId);
+      if (extractedReqs && extractedReqs.length > 0) {
+        setReqSkills(extractedReqs.map(rs => ({
+          skill_id: rs.skill_id,
+          skill_name: rs.skill?.name || `Skill #${rs.skill_id}`,
+          importance: rs.importance || 1.0,
+          required_level: rs.required_level || 'Intermediate'
+        })));
+      }
+    } catch (err: any) {
+      setErrorMsg(normalizeApiError(err));
+    } finally {
+      setAnalyzingJob(false);
+    }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -61,7 +115,7 @@ export const PostOpportunity: React.FC<PostOpportunityProps> = ({
 
     setLoading(true);
     try {
-      await api.createOpportunity({
+      await api.updateOpportunity(oppId, {
         title,
         company,
         type,
@@ -77,7 +131,7 @@ export const PostOpportunity: React.FC<PostOpportunityProps> = ({
           required_level: s.required_level
         }))
       });
-      onCreateSuccess();
+      await onUpdateSuccess();
       navigate('/industry/opportunities');
     } catch (err: any) {
       setErrorMsg(normalizeApiError(err));
@@ -85,6 +139,14 @@ export const PostOpportunity: React.FC<PostOpportunityProps> = ({
       setLoading(false);
     }
   };
+
+  if (!opportunity) {
+    return (
+      <div className="p-8 text-center bg-white rounded-2xl border border-slate-200 text-xs text-slate-500">
+        Opportunity not found or access unauthorized.
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6 max-w-3xl mx-auto">
@@ -96,8 +158,8 @@ export const PostOpportunity: React.FC<PostOpportunityProps> = ({
           <ArrowLeft className="w-4 h-4" />
         </button>
         <div>
-          <h1 className="text-xl font-bold text-slate-900">Post Corporate Position</h1>
-          <p className="text-xs text-slate-500">Create Internship or Permanent Placement Posting</p>
+          <h1 className="text-xl font-bold text-slate-900">Edit Opportunity #{oppId}</h1>
+          <p className="text-xs text-slate-500">Update Posting Details & Capability Requirements</p>
         </div>
       </div>
 
@@ -117,7 +179,6 @@ export const PostOpportunity: React.FC<PostOpportunityProps> = ({
               required
               value={title}
               onChange={e => setTitle(e.target.value)}
-              placeholder="e.g. AI/ML Engineering Intern"
               className="w-full px-3 py-2 border rounded-xl"
             />
           </div>
@@ -129,7 +190,6 @@ export const PostOpportunity: React.FC<PostOpportunityProps> = ({
               required
               value={company}
               onChange={e => setCompany(e.target.value)}
-              placeholder="e.g. Bharat AI Innovations Ltd"
               className="w-full px-3 py-2 border rounded-xl"
             />
           </div>
@@ -143,6 +203,7 @@ export const PostOpportunity: React.FC<PostOpportunityProps> = ({
             >
               <option value="internship">Corporate Internship (PMIS)</option>
               <option value="placement">Permanent Placement (Full-Time)</option>
+              <option value="project">Project Work</option>
             </select>
           </div>
 
@@ -150,6 +211,7 @@ export const PostOpportunity: React.FC<PostOpportunityProps> = ({
             <label className="font-bold text-slate-700 block mb-1">Duration (Months)</label>
             <input
               type="number"
+              min={1}
               value={duration}
               onChange={e => setDuration(Number(e.target.value))}
               className="w-full px-3 py-2 border rounded-xl"
@@ -157,9 +219,10 @@ export const PostOpportunity: React.FC<PostOpportunityProps> = ({
           </div>
 
           <div>
-            <label className="font-bold text-slate-700 block mb-1">Monthly Stipend / Compensation (Rs.)</label>
+            <label className="font-bold text-slate-700 block mb-1">Monthly Compensation (Rs.)</label>
             <input
               type="number"
+              min={0}
               value={stipend}
               onChange={e => setStipend(Number(e.target.value))}
               className="w-full px-3 py-2 border rounded-xl"
@@ -172,7 +235,6 @@ export const PostOpportunity: React.FC<PostOpportunityProps> = ({
               type="text"
               value={location}
               onChange={e => setLocation(e.target.value)}
-              placeholder="e.g. New Delhi"
               className="w-full px-3 py-2 border rounded-xl"
             />
           </div>
@@ -183,7 +245,6 @@ export const PostOpportunity: React.FC<PostOpportunityProps> = ({
               type="text"
               value={sector}
               onChange={e => setSector(e.target.value)}
-              placeholder="e.g. IT & Software"
               className="w-full px-3 py-2 border rounded-xl"
             />
           </div>
@@ -195,18 +256,27 @@ export const PostOpportunity: React.FC<PostOpportunityProps> = ({
             type="text"
             value={streams}
             onChange={e => setStreams(e.target.value)}
-            placeholder="e.g. Computer Science, B.Tech, MCA"
             className="w-full px-3 py-2 border rounded-xl"
           />
         </div>
 
         <div>
-          <label className="font-bold text-slate-700 block mb-1">Position Description</label>
+          <div className="flex justify-between items-center mb-1">
+            <label className="font-bold text-slate-700">Position Description</label>
+            <button
+              type="button"
+              onClick={handleAnalyzeJobDescription}
+              disabled={analyzingJob}
+              className="text-[11px] font-bold text-amber-700 hover:text-amber-800 bg-amber-50 hover:bg-amber-100 border border-amber-200 px-2.5 py-1 rounded-lg flex items-center space-x-1 transition-all"
+            >
+              <Sparkles className="w-3.5 h-3.5 text-amber-500" />
+              <span>{analyzingJob ? 'Extracting AI Skills...' : 'Extract AI Skills from Description'}</span>
+            </button>
+          </div>
           <textarea
-            rows={3}
+            rows={4}
             value={description}
             onChange={e => setDescription(e.target.value)}
-            placeholder="Describe role responsibilities and key deliverables..."
             className="w-full px-3 py-2 border rounded-xl"
           />
         </div>
@@ -229,7 +299,7 @@ export const PostOpportunity: React.FC<PostOpportunityProps> = ({
             <button
               type="button"
               onClick={handleAddSkill}
-              className="px-4 py-2 bg-emerald-600 text-white font-bold rounded-xl"
+              className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl"
             >
               Add Skill
             </button>
@@ -257,7 +327,7 @@ export const PostOpportunity: React.FC<PostOpportunityProps> = ({
                   <button
                     type="button"
                     onClick={() => handleRemoveSkill(s.skill_id)}
-                    className="text-rose-600 font-bold hover:underline"
+                    className="text-rose-600 font-bold hover:underline text-xs"
                   >
                     Remove
                   </button>
@@ -271,7 +341,7 @@ export const PostOpportunity: React.FC<PostOpportunityProps> = ({
           <button
             type="button"
             onClick={() => navigate('/industry/opportunities')}
-            className="px-4 py-2 bg-slate-100 text-slate-700 font-bold rounded-xl"
+            className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl"
           >
             Cancel
           </button>
@@ -280,7 +350,7 @@ export const PostOpportunity: React.FC<PostOpportunityProps> = ({
             disabled={loading}
             className="px-6 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl transition-all shadow-sm disabled:opacity-50"
           >
-            {loading ? 'Publishing...' : 'Publish Opportunity'}
+            {loading ? 'Saving Changes...' : 'Save Changes'}
           </button>
         </div>
       </form>

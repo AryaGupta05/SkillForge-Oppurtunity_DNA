@@ -171,7 +171,9 @@ def test_candidate_application_listing():
 def test_opportunity_application_listing():
     """Test that applications for an opportunity are returned correctly."""
     db = _mock_db()
+    user = _make_user(id=1, role="industry", account_status="active")
     opportunity = _make_opportunity()
+    opportunity.posted_by_user_id = user.id
     apps = [_make_application(id=1), _make_application(id=2)]
     
     def query_side_effect(model):
@@ -183,7 +185,7 @@ def test_opportunity_application_listing():
         return q
     db.query = query_side_effect
     
-    result = get_opportunity_applications(1, db)
+    result = get_opportunity_applications(1, db, current_user=user)
     assert len(result) == 2
 
 
@@ -204,16 +206,21 @@ def test_valid_status_transitions():
     
     for from_status, to_status in valid_chains:
         db = _mock_db()
+        user = _make_user(id=1, role="industry", account_status="active")
         app = _make_application(status=from_status)
+        app.opportunity.posted_by_user_id = user.id
         
         def query_side_effect(model):
             q = MagicMock()
-            q.filter.return_value.first.return_value = app
+            if model == models.Opportunity:
+                q.filter.return_value.first.return_value = app.opportunity
+            elif model == models.Application:
+                q.filter.return_value.first.return_value = app
             return q
         db.query = query_side_effect
         
         payload = schemas.ApplicationStatusUpdate(status=to_status)
-        result = update_application_status(1, payload, db)
+        result = update_application_status(1, payload, db, current_user=user)
         
         assert app.status == to_status, f"Transition {from_status} -> {to_status} failed"
         db.commit.assert_called()
@@ -242,18 +249,23 @@ def test_invalid_status_transitions():
     
     for from_status, to_status in invalid_chains:
         db = _mock_db()
+        user = _make_user(id=1, role="industry", account_status="active")
         app = _make_application(status=from_status)
+        app.opportunity.posted_by_user_id = user.id
         
         def query_side_effect(model):
             q = MagicMock()
-            q.filter.return_value.first.return_value = app
+            if model == models.Opportunity:
+                q.filter.return_value.first.return_value = app.opportunity
+            elif model == models.Application:
+                q.filter.return_value.first.return_value = app
             return q
         db.query = query_side_effect
         
         payload = schemas.ApplicationStatusUpdate(status=to_status)
         
         with pytest.raises(HTTPException) as exc_info:
-            update_application_status(1, payload, db)
+            update_application_status(1, payload, db, current_user=user)
         assert exc_info.value.status_code == 400, f"Transition {from_status} -> {to_status} should be rejected"
 
 
@@ -380,16 +392,21 @@ def test_placement_opportunity_type():
 def test_shortlist_persistence():
     """Test that shortlisting persists via application status update."""
     db = _mock_db()
+    user = _make_user(id=1, role="industry", account_status="active")
     app = _make_application(status="applied")
+    app.opportunity.posted_by_user_id = user.id
     
     def query_side_effect(model):
         q = MagicMock()
-        q.filter.return_value.first.return_value = app
+        if model == models.Opportunity:
+            q.filter.return_value.first.return_value = app.opportunity
+        elif model == models.Application:
+            q.filter.return_value.first.return_value = app
         return q
     db.query = query_side_effect
     
     payload = schemas.ApplicationStatusUpdate(status="shortlisted", notes="Strong ML profile")
-    result = update_application_status(1, payload, db)
+    result = update_application_status(1, payload, db, current_user=user)
     
     # Verify the status was actually changed on the ORM object
     assert app.status == "shortlisted"

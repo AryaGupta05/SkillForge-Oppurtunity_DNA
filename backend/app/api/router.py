@@ -92,7 +92,42 @@ def verify_candidate_access(candidate_id: int, user: models.User, db: Session) -
                 detail="Students are only allowed to access their own candidate data."
             )
             
+    if user.role == "academia":
+        user_inst = (user.institution or "").lower().strip()
+        cand_inst = (candidate.institution or "").lower().strip()
+        if not user_inst or not cand_inst or user_inst != cand_inst:
+            raise HTTPException(
+                status_code=403,
+                detail="Academia users are only allowed to access candidate data from their own institution."
+            )
+
     return candidate
+
+
+def verify_opportunity_ownership(opportunity_id: int, user: models.User, db: Session) -> models.Opportunity:
+    opp = db.query(models.Opportunity).filter(models.Opportunity.id == opportunity_id).first()
+    if not opp:
+        raise HTTPException(status_code=404, detail="Opportunity not found")
+        
+    if user.role == "admin":
+        return opp
+
+    if user.role == "industry":
+        # First check explicit user ownership
+        if opp.posted_by_user_id == user.id:
+            return opp
+        # Also check company ownership if posted_by_user_id is None or matches company
+        user_company = (user.company or "").lower().strip()
+        opp_company = (opp.company or "").lower().strip()
+        if user_company and opp_company and user_company == opp_company:
+            return opp
+
+        raise HTTPException(
+            status_code=403,
+            detail="Access forbidden: You can only access or modify opportunities owned by your organization."
+        )
+
+    return opp
 
 
 def build_user_response(user: models.User, db: Session) -> schemas.UserResponse:
@@ -663,7 +698,14 @@ def get_candidates(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_role("industry", "academia", "admin"))
 ):
-    return db.query(models.Candidate).all()
+    query = db.query(models.Candidate)
+    if current_user.role == "academia":
+        user_inst = (current_user.institution or "").lower().strip()
+        if not user_inst:
+            return []
+        from sqlalchemy import func
+        query = query.filter(func.lower(models.Candidate.institution) == user_inst)
+    return query.all()
 
 
 @api_router.get("/candidates/{candidate_id}", response_model=schemas.CandidateResponse)
@@ -1244,10 +1286,28 @@ def create_opportunity(
 
 @api_router.get("/opportunities", response_model=List[schemas.OpportunityResponse])
 def get_opportunities(
+    my_only: bool = False,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_active_user)
 ):
-    return db.query(models.Opportunity).all()
+    query = db.query(models.Opportunity)
+    if my_only:
+        if current_user.role == "industry":
+            user_company = (current_user.company or "").lower().strip()
+            if user_company:
+                from sqlalchemy import func, or_
+                query = query.filter(
+                    or_(
+                        models.Opportunity.posted_by_user_id == current_user.id,
+                        func.lower(models.Opportunity.company) == user_company
+                    )
+                )
+            else:
+                query = query.filter(models.Opportunity.posted_by_user_id == current_user.id)
+        elif current_user.role != "admin":
+            query = query.filter(models.Opportunity.posted_by_user_id == current_user.id)
+            
+    return query.all()
 
 
 @api_router.get("/opportunities/{opportunity_id}", response_model=schemas.OpportunityResponse)
@@ -1259,6 +1319,44 @@ def get_opportunity(
     opp = db.query(models.Opportunity).filter(models.Opportunity.id == opportunity_id).first()
     if not opp:
         raise HTTPException(status_code=404, detail="Opportunity not found")
+    return opp
+
+
+@api_router.put("/opportunities/{opportunity_id}", response_model=schemas.OpportunityResponse)
+def update_opportunity(
+    opportunity_id: int,
+    payload: schemas.OpportunityUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_role("industry", "admin"))
+):
+    opp = verify_opportunity_ownership(opportunity_id, current_user, db)
+
+    update_data = payload.model_dump(exclude_unset=True)
+    required_skills_data = update_data.pop("required_skills", None)
+
+    for field, val in update_data.items():
+        if hasattr(opp, field):
+            setattr(opp, field, val)
+
+    if required_skills_data is not None:
+        db.query(models.OpportunitySkill).filter(
+            models.OpportunitySkill.opportunity_id == opportunity_id
+        ).delete(synchronize_session=False)
+        db.flush()
+
+        for skill_req in required_skills_data:
+            opp_skill = models.OpportunitySkill(
+                opportunity_id=opp.id,
+                skill_id=skill_req["skill_id"],
+                importance=skill_req.get("importance", 1.0),
+                required_level=skill_req.get("required_level"),
+                requirement_type=skill_req.get("requirement_type", "required"),
+                evidence_expectation=skill_req.get("evidence_expectation")
+            )
+            db.add(opp_skill)
+
+    db.commit()
+    db.refresh(opp)
     return opp
 
 
@@ -1404,9 +1502,7 @@ def analyze_opportunity_requirements(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_role("industry", "admin"))
 ):
-    opp = db.query(models.Opportunity).filter(models.Opportunity.id == opportunity_id).first()
-    if not opp:
-        raise HTTPException(status_code=404, detail="Opportunity not found")
+    opp = verify_opportunity_ownership(opportunity_id, current_user, db)
         
     if not opp.description or not opp.description.strip():
         raise HTTPException(status_code=400, detail="Job description is empty. Cannot perform analysis.")
@@ -2121,9 +2217,7 @@ def get_opportunity_applications(
     current_user: models.User = Depends(require_role("industry", "academia", "admin"))
 ):
     """Industry partner views applications for an opportunity."""
-    opportunity = db.query(models.Opportunity).filter(models.Opportunity.id == opportunity_id).first()
-    if not opportunity:
-        raise HTTPException(status_code=404, detail="Opportunity not found")
+    opportunity = verify_opportunity_ownership(opportunity_id, current_user, db)
 
     applications = db.query(models.Application).filter(
         models.Application.opportunity_id == opportunity_id
@@ -2142,6 +2236,8 @@ def update_application_status(
     application = db.query(models.Application).filter(models.Application.id == application_id).first()
     if not application:
         raise HTTPException(status_code=404, detail="Application not found")
+
+    verify_opportunity_ownership(application.opportunity_id, current_user, db)
 
     new_status = payload.status.lower().strip()
     valid_statuses = {"applied", "shortlisted", "offered", "placed", "rejected"}
@@ -2169,6 +2265,64 @@ def update_application_status(
 # =============================================================================
 # SIH26044: ANALYTICS ENDPOINTS
 # =============================================================================
+
+@api_router.get("/analytics/industry-dashboard", response_model=schemas.IndustryDashboardResponse)
+def get_industry_dashboard(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_role("industry", "admin"))
+):
+    """Organization-scoped dashboard metrics aggregated directly from the database."""
+    if isinstance(current_user, models.User):
+        if current_user.role not in ["industry", "admin"]:
+            raise HTTPException(status_code=403, detail="Non-industry users cannot access the industry dashboard")
+        if current_user.account_status != "active":
+            raise HTTPException(status_code=403, detail="Account pending verification or inactive.")
+
+    from sqlalchemy import func, or_
+
+    # Determine opportunity scope for the current recruiter
+    opp_query = db.query(models.Opportunity)
+    if current_user.role == "industry":
+        if current_user.company:
+            opp_query = opp_query.filter(
+                or_(
+                    models.Opportunity.posted_by_user_id == current_user.id,
+                    models.Opportunity.company.ilike(current_user.company)
+                )
+            )
+        else:
+            opp_query = opp_query.filter(models.Opportunity.posted_by_user_id == current_user.id)
+
+    org_opps = opp_query.all()
+    org_opp_ids = [o.id for o in org_opps]
+    total_opportunities = len(org_opps)
+
+    # Query applications for these opportunities
+    if org_opp_ids:
+        apps = db.query(models.Application).filter(
+            models.Application.opportunity_id.in_(org_opp_ids)
+        ).order_by(models.Application.applied_at.desc()).all()
+    else:
+        apps = []
+
+    app_stats = {"applied": 0, "shortlisted": 0, "offered": 0, "placed": 0, "rejected": 0, "total": len(apps)}
+    for a in apps:
+        if a.status in app_stats:
+            app_stats[a.status] += 1
+
+    recent_apps = [_application_to_response(a) for a in apps[:10]]
+
+    return schemas.IndustryDashboardResponse(
+        company_name=current_user.company or current_user.full_name or "Corporate Partner",
+        total_opportunities=total_opportunities,
+        total_applications=len(apps),
+        shortlisted_count=app_stats["shortlisted"],
+        offered_count=app_stats["offered"],
+        placed_count=app_stats["placed"],
+        rejected_count=app_stats["rejected"],
+        application_stats=app_stats,
+        recent_applications=recent_apps
+    )
 
 @api_router.get("/analytics/skill-demand", response_model=schemas.SkillDemandResponse)
 def get_skill_demand_analytics(
@@ -2227,7 +2381,7 @@ def get_institution_dashboard(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_role("academia", "admin"))
 ):
-    """Institution-level aggregate dashboard with real database metrics."""
+    """Institution-level aggregate dashboard with real database metrics strictly scoped for Academia users."""
     if isinstance(current_user, models.User):
         if current_user.role == "student":
             raise HTTPException(status_code=403, detail="Students cannot access institution dashboard")
@@ -2236,7 +2390,21 @@ def get_institution_dashboard(
 
     from sqlalchemy import func
 
-    total_students = db.query(func.count(models.Candidate.id)).scalar() or 0
+    inst_filter = None
+    if current_user.role == "academia":
+        user_inst = (current_user.institution or "").lower().strip()
+        if user_inst:
+            inst_filter = func.lower(models.Candidate.institution) == user_inst
+        else:
+            # Academia user without institution sees 0 candidate stats
+            inst_filter = (models.Candidate.id == -1)
+
+    # Total students
+    cand_query = db.query(func.count(models.Candidate.id))
+    if inst_filter is not None:
+        cand_query = cand_query.filter(inst_filter)
+    total_students = cand_query.scalar() or 0
+
     total_opportunities = db.query(func.count(models.Opportunity.id)).scalar() or 0
 
     internship_count = db.query(func.count(models.Opportunity.id)).filter(
@@ -2250,12 +2418,18 @@ def get_institution_dashboard(
     ).scalar() or 0
 
     # Top student skills (by number of students possessing them)
-    student_skill_rows = db.query(
+    student_skill_q = db.query(
         models.Skill.name,
         func.count(models.CandidateSkill.candidate_id.distinct()).label("student_count")
     ).join(
         models.CandidateSkill, models.Skill.id == models.CandidateSkill.skill_id
-    ).group_by(
+    )
+    if inst_filter is not None:
+        student_skill_q = student_skill_q.join(
+            models.Candidate, models.CandidateSkill.candidate_id == models.Candidate.id
+        ).filter(inst_filter)
+
+    student_skill_rows = student_skill_q.group_by(
         models.Skill.name
     ).order_by(
         func.count(models.CandidateSkill.candidate_id.distinct()).desc()
@@ -2288,7 +2462,6 @@ def get_institution_dashboard(
     ]
 
     # Skill gap analysis: demand vs supply
-    # Build demand map
     demand_map = {name: cnt for name, _cat, cnt in demand_rows}
     supply_map = {name: cnt for name, cnt in student_skill_rows}
 
@@ -2305,9 +2478,15 @@ def get_institution_dashboard(
 
     # Application statistics
     app_stats = {"applied": 0, "shortlisted": 0, "offered": 0, "placed": 0, "rejected": 0, "total": 0}
-    app_rows = db.query(
+    app_q = db.query(
         models.Application.status, func.count(models.Application.id)
-    ).group_by(models.Application.status).all()
+    )
+    if inst_filter is not None:
+        app_q = app_q.join(
+            models.Candidate, models.Application.candidate_id == models.Candidate.id
+        ).filter(inst_filter)
+    
+    app_rows = app_q.group_by(models.Application.status).all()
     for status, count in app_rows:
         if status in app_stats:
             app_stats[status] = count
@@ -2317,11 +2496,17 @@ def get_institution_dashboard(
     internship_app_stats = {"applied": 0, "shortlisted": 0, "offered": 0, "placed": 0, "rejected": 0, "total": 0}
     placement_app_stats = {"applied": 0, "shortlisted": 0, "offered": 0, "placed": 0, "rejected": 0, "total": 0}
 
-    app_type_rows = db.query(
+    app_type_q = db.query(
         models.Opportunity.type, models.Application.status, func.count(models.Application.id)
     ).join(
         models.Application, models.Opportunity.id == models.Application.opportunity_id
-    ).group_by(
+    )
+    if inst_filter is not None:
+        app_type_q = app_type_q.join(
+            models.Candidate, models.Application.candidate_id == models.Candidate.id
+        ).filter(inst_filter)
+
+    app_type_rows = app_type_q.group_by(
         models.Opportunity.type, models.Application.status
     ).all()
 
@@ -2332,7 +2517,12 @@ def get_institution_dashboard(
         target["total"] += count
 
     # Average Match Readiness
-    avg_score = db.query(func.avg(models.Recommendation.match_score)).scalar() or 0.0
+    avg_q = db.query(func.avg(models.Recommendation.match_score))
+    if inst_filter is not None:
+        avg_q = avg_q.join(
+            models.Candidate, models.Recommendation.candidate_id == models.Candidate.id
+        ).filter(inst_filter)
+    avg_score = avg_q.scalar() or 0.0
     avg_match_readiness = round(avg_score * 100.0 if avg_score <= 1.0 else avg_score, 1)
 
     return schemas.InstitutionDashboardResponse(

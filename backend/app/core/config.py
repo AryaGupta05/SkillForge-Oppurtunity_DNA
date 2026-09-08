@@ -22,12 +22,17 @@ class Settings(BaseSettings):
     RESEND_API_KEY: Optional[str] = ""
     EMAIL_FROM: Optional[str] = "noreply@opportunity-dna.in"
 
-    # Security & OTP Settings
+    # Security & JWT Settings
     SECRET_KEY: str = "dev-secret-key-change-in-prod"
+    JWT_ALGORITHM: str = "HS256"
+    JWT_EXPIRE_MINUTES: int = 1440
     OTP_HASH_SECRET: str = "dev-otp-secret-change-in-prod"
     OTP_EXPIRY_MINUTES: int = 10
     OTP_RESEND_COOLDOWN_SECONDS: int = 60
     OTP_MAX_ATTEMPTS: int = 5
+
+    # CORS Settings
+    CORS_ALLOWED_ORIGINS: str = "http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000"
 
     model_config = SettingsConfigDict(
         env_file=[

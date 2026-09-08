@@ -1,12 +1,13 @@
 import React from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Briefcase, PlusCircle } from 'lucide-react';
-import type { Opportunity, Application, UserResponse } from '../../types';
+import { Briefcase, PlusCircle, UserCheck } from 'lucide-react';
+import type { Opportunity, Application, UserResponse, IndustryDashboardResponse } from '../../types';
 
 interface IndustryDashboardProps {
   currentUser: UserResponse | null;
   opportunities: Opportunity[];
   opportunityApplications: Application[];
+  dashboardData: IndustryDashboardResponse | null;
   onLoadRankings: (oppId: number) => void;
 }
 
@@ -14,15 +15,17 @@ export const IndustryDashboard: React.FC<IndustryDashboardProps> = ({
   currentUser,
   opportunities,
   opportunityApplications,
+  dashboardData,
   onLoadRankings
 }) => {
   const navigate = useNavigate();
 
-  const totalOpps = opportunities.length;
-  const totalApps = opportunityApplications.length;
-  const shortlistedCount = opportunityApplications.filter(a => a.status === 'shortlisted').length;
-  const offeredCount = opportunityApplications.filter(a => a.status === 'offered').length;
-  const placedCount = opportunityApplications.filter(a => a.status === 'placed').length;
+  const totalOpps = dashboardData ? dashboardData.total_opportunities : opportunities.length;
+  const totalApps = dashboardData ? dashboardData.total_applications : opportunityApplications.length;
+  const shortlistedCount = dashboardData ? dashboardData.shortlisted_count : opportunityApplications.filter(a => a.status === 'shortlisted').length;
+  const offeredCount = dashboardData ? dashboardData.offered_count : opportunityApplications.filter(a => a.status === 'offered').length;
+  const placedCount = dashboardData ? dashboardData.placed_count : opportunityApplications.filter(a => a.status === 'placed').length;
+  const recentApps = dashboardData ? dashboardData.recent_applications : opportunityApplications.slice(0, 5);
 
   return (
     <div className="space-y-6">
@@ -112,7 +115,7 @@ export const IndustryDashboard: React.FC<IndustryDashboardProps> = ({
                   <span className="text-xs text-slate-500">{opp.location}</span>
                 </div>
                 <h3 className="text-sm font-bold text-slate-900 mt-1">{opp.title}</h3>
-                <p className="text-xs text-slate-500">{opp.company} • Stipend: Rs. {opp.stipend?.toLocaleString() || 15000}/mo</p>
+                <p className="text-xs text-slate-500">{opp.company} • Compensation: Rs. {opp.stipend?.toLocaleString() || 15000}/mo</p>
               </div>
 
               <div className="flex items-center space-x-2">
@@ -130,6 +133,39 @@ export const IndustryDashboard: React.FC<IndustryDashboardProps> = ({
           ))}
         </div>
       </div>
+
+      {/* Recent Applications Section */}
+      {recentApps && recentApps.length > 0 && (
+        <div className="bg-white p-6 rounded-2xl border border-slate-200 space-y-4">
+          <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+            <h2 className="text-sm font-bold text-slate-900 flex items-center space-x-2">
+              <UserCheck className="w-4 h-4 text-emerald-600" />
+              <span>Recent Application Activity</span>
+            </h2>
+            <span className="text-xs text-slate-500">Latest candidate submissions</span>
+          </div>
+
+          <div className="space-y-2">
+            {recentApps.map((app) => (
+              <div key={app.id} className="p-3 bg-slate-50 rounded-xl border border-slate-100 flex items-center justify-between text-xs">
+                <div>
+                  <span className="font-bold text-slate-900">{app.candidate_name || `Candidate #${app.candidate_id}`}</span>
+                  <span className="text-slate-500 font-normal"> applied for </span>
+                  <span className="font-semibold text-slate-800">{app.opportunity_title}</span>
+                </div>
+                <span className={`font-bold px-2 py-0.5 rounded capitalize ${
+                  app.status === 'shortlisted' ? 'bg-amber-100 text-amber-800' :
+                  app.status === 'offered' ? 'bg-emerald-100 text-emerald-800' :
+                  app.status === 'placed' ? 'bg-purple-100 text-purple-800' :
+                  app.status === 'rejected' ? 'bg-rose-100 text-rose-800' : 'bg-slate-200 text-slate-700'
+                }`}>
+                  {app.status}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 };

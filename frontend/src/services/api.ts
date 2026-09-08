@@ -17,6 +17,7 @@ import type {
   Application,
   SkillDemandResponse,
   InstitutionDashboardResponse,
+  IndustryDashboardResponse,
   RegisterPayload,
   LoginPayload,
   TokenResponse,
@@ -208,8 +209,9 @@ export const api = {
   },
 
   // Opportunities
-  async getOpportunities(): Promise<Opportunity[]> {
-    const res = await fetch(`${API_BASE_URL}/opportunities`, { headers: getHeaders() });
+  async getOpportunities(myOnly: boolean = false): Promise<Opportunity[]> {
+    const url = myOnly ? `${API_BASE_URL}/opportunities?my_only=true` : `${API_BASE_URL}/opportunities`;
+    const res = await fetch(url, { headers: getHeaders() });
     return handleResponse(res);
   },
 
@@ -232,6 +234,26 @@ export const api = {
   }): Promise<Opportunity> {
     const res = await fetch(`${API_BASE_URL}/opportunities`, {
       method: 'POST',
+      headers: getHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(opp),
+    });
+    return handleResponse(res);
+  },
+
+  async updateOpportunity(id: number, opp: {
+    title?: string;
+    company?: string;
+    description?: string;
+    type?: 'internship' | 'placement' | 'project';
+    duration_months?: number;
+    stipend?: number;
+    location?: string;
+    sector?: string;
+    allowed_streams?: string;
+    required_skills?: { skill_id: number; importance: number; required_level?: string }[];
+  }): Promise<Opportunity> {
+    const res = await fetch(`${API_BASE_URL}/opportunities/${id}`, {
+      method: 'PUT',
       headers: getHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(opp),
     });
@@ -428,6 +450,11 @@ export const api = {
 
   async getInstitutionDashboard(): Promise<InstitutionDashboardResponse> {
     const res = await fetch(`${API_BASE_URL}/analytics/institution-dashboard`, { headers: getHeaders() });
+    return handleResponse(res);
+  },
+
+  async getIndustryDashboard(): Promise<IndustryDashboardResponse> {
+    const res = await fetch(`${API_BASE_URL}/analytics/industry-dashboard`, { headers: getHeaders() });
     return handleResponse(res);
   },
 

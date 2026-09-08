@@ -11,6 +11,7 @@ import type {
   Application,
   OpportunityDNAProfileResponse,
   InstitutionDashboardResponse,
+  IndustryDashboardResponse,
   UserResponse
 } from './types';
 
@@ -38,6 +39,7 @@ import { IndustryDashboard } from './portals/industry/IndustryDashboard';
 import { IndustryCompany } from './portals/industry/IndustryCompany';
 import { IndustryOpportunities } from './portals/industry/IndustryOpportunities';
 import { PostOpportunity } from './portals/industry/PostOpportunity';
+import { EditOpportunity } from './portals/industry/EditOpportunity';
 import { IndustryApplicants } from './portals/industry/IndustryApplicants';
 import { IndustryAnalytics } from './portals/industry/IndustryAnalytics';
 import { IndustrySettings } from './portals/industry/IndustrySettings';
@@ -85,6 +87,7 @@ export default function App() {
   const [rankedCandidates, setRankedCandidates] = useState<CandidateMatchResultOut[]>([]);
   const matchingMode = 'skills_first';
   const [opportunityApplications, setOpportunityApplications] = useState<Application[]>([]);
+  const [industryDashboardData, setIndustryDashboardData] = useState<IndustryDashboardResponse | null>(null);
   const [viewingCandidateDNA, setViewingCandidateDNA] = useState<{ candidateName: string; dna: OpportunityDNAProfileResponse | null } | null>(null);
   const [skillsCatalog, setSkillsCatalog] = useState<any[]>([]);
 
@@ -142,8 +145,9 @@ export default function App() {
           loadStudentData(user.candidate_id!, opps.length > 0 ? opps[0] : null);
         }).catch(() => {});
       } else if (user.role === 'industry') {
-        api.getOpportunities().then(opps => {
+        api.getOpportunities(true).then(opps => {
           setOpportunities(opps);
+          handleFetchIndustryDashboard();
           if (opps.length > 0) handleLoadOpportunityApplications(opps[0].id);
         }).catch(() => {});
       } else if (user.role === 'academia') {
@@ -171,6 +175,15 @@ export default function App() {
       setInstitutionError(err.message || 'Failed to load institution dashboard analytics.');
     } finally {
       setInstitutionLoading(false);
+    }
+  };
+
+  const handleFetchIndustryDashboard = async () => {
+    try {
+      const data = await api.getIndustryDashboard();
+      setIndustryDashboardData(data);
+    } catch (err: any) {
+      console.error('Failed to fetch industry dashboard analytics:', err);
     }
   };
 
@@ -224,12 +237,13 @@ export default function App() {
             } else if (u.role === 'industry') {
               const [cands, opps, sks] = await Promise.all([
                 api.getCandidates().catch(() => []),
-                api.getOpportunities().catch(() => []),
+                api.getOpportunities(true).catch(() => []),
                 api.getSkills().catch(() => [])
               ]);
               setCandidates(cands);
               setOpportunities(opps);
               setSkillsCatalog(sks);
+              await handleFetchIndustryDashboard();
               if (opps.length > 0) await handleLoadOpportunityApplications(opps[0].id);
             } else if (u.role === 'academia') {
               const [cands, opps, sks] = await Promise.all([
@@ -616,6 +630,7 @@ export default function App() {
                 currentUser={currentUser} 
                 opportunities={opportunities} 
                 opportunityApplications={opportunityApplications} 
+                dashboardData={industryDashboardData}
                 onLoadRankings={handleLoadOpportunityApplications} 
               />
             } 
@@ -642,9 +657,25 @@ export default function App() {
             element={
               <PostOpportunity 
                 skillsCatalog={skillsCatalog} 
+                currentUser={currentUser}
                 onCreateSuccess={async () => {
-                  const updatedOpps = await api.getOpportunities();
+                  const updatedOpps = await api.getOpportunities(true);
                   setOpportunities(updatedOpps);
+                  await handleFetchIndustryDashboard();
+                }} 
+              />
+            } 
+          />
+          <Route 
+            path="opportunities/:id/edit" 
+            element={
+              <EditOpportunity 
+                skillsCatalog={skillsCatalog} 
+                opportunities={opportunities}
+                onUpdateSuccess={async () => {
+                  const updatedOpps = await api.getOpportunities(true);
+                  setOpportunities(updatedOpps);
+                  await handleFetchIndustryDashboard();
                 }} 
               />
             } 
@@ -705,6 +736,7 @@ export default function App() {
             path="dashboard" 
             element={
               <AcademiaDashboard 
+                currentUser={currentUser}
                 institutionData={institutionData} 
                 loading={institutionLoading} 
                 error={institutionError} 
@@ -726,6 +758,7 @@ export default function App() {
             path="students" 
             element={
               <AcademiaStudents 
+                currentUser={currentUser}
                 candidates={candidates} 
                 onViewDNA={handleViewCandidateDNA} 
               />
@@ -735,6 +768,7 @@ export default function App() {
             path="skill-supply" 
             element={
               <StudentSkillSupply 
+                currentUser={currentUser}
                 institutionData={institutionData} 
                 onDrillDownSkill={handleDrillDownSkill} 
               />
@@ -744,6 +778,7 @@ export default function App() {
             path="industry-demand" 
             element={
               <IndustryDemandView 
+                currentUser={currentUser}
                 institutionData={institutionData} 
               />
             } 
@@ -752,7 +787,9 @@ export default function App() {
             path="skill-gaps" 
             element={
               <SkillGapAnalysis 
+                currentUser={currentUser}
                 institutionData={institutionData} 
+                onDrillDownSkill={handleDrillDownSkill}
               />
             } 
           />
@@ -760,6 +797,7 @@ export default function App() {
             path="outcomes" 
             element={
               <PlacementOutcomes 
+                currentUser={currentUser}
                 institutionData={institutionData} 
               />
             } 

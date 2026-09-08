@@ -463,3 +463,31 @@ export interface InstitutionDashboardResponse {
   avg_match_readiness?: number;
 }
 
+// --- PHASE 3: GITHUB REPOSITORY EVIDENCE INGESTION TYPES ---
+
+export interface GitHubAnalyzeRequest {
+  repository_url: string;
+}
+
+export interface GitHubAnalyzedSkill {
+  name: string;
+  category: string;
+  skill_type: 'explicit' | 'inferred' | 'adjacent';
+  proficiency: string;
+  confidence: number;
+  evidence_count: number;
+  explanation: string;
+}
+
+export interface GitHubAnalysisResponse {
+  repository_url: string;
+  repository_name: string;
+  repository_description?: string;
+  primary_language?: string;
+  files_analyzed: number;
+  total_text_bytes: number;
+  evidence_created: number;
+  skills_discovered: GitHubAnalyzedSkill[];
+  dna_updated: boolean;
+  message: string;
+}

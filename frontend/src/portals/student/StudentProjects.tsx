@@ -1,15 +1,18 @@
 import React, { useState } from 'react';
 import { FolderGit2, PlusCircle, Calendar } from 'lucide-react';
 import type { Candidate, Evidence } from '../../types';
+import { GitHubAnalyzer } from './GitHubAnalyzer';
 
 interface StudentProjectsProps {
   candidate: Candidate | null;
   onAddProject?: (project: { title: string; description: string; source: string }) => void;
+  onAnalysisComplete?: () => void;
 }
 
 export const StudentProjects: React.FC<StudentProjectsProps> = ({
   candidate,
-  onAddProject
+  onAddProject,
+  onAnalysisComplete
 }) => {
   const [showAddModal, setShowAddModal] = useState(false);
   const [title, setTitle] = useState('');
@@ -47,6 +50,14 @@ export const StudentProjects: React.FC<StudentProjectsProps> = ({
           <span>Add Project</span>
         </button>
       </div>
+
+      {/* GitHub Repository Analyzer */}
+      {candidate.id && (
+        <GitHubAnalyzer
+          candidateId={candidate.id}
+          onAnalysisComplete={onAnalysisComplete}
+        />
+      )}
 
       <div className="space-y-4">
         {evidence.length === 0 ? (

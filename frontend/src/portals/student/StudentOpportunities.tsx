@@ -1,8 +1,11 @@
 import React, { useState } from 'react';
-import { MapPin, DollarSign, Target, CheckCircle2, Filter } from 'lucide-react';
-import type { Opportunity, Application } from '../../types';
+import { useNavigate } from 'react-router-dom';
+import { MapPin, DollarSign, Target, CheckCircle2, Filter, Eye } from 'lucide-react';
+import type { Opportunity, Application, Candidate } from '../../types';
+import { OpportunityDetailModal } from '../../components/modals/OpportunityDetailModal';
 
 interface StudentOpportunitiesProps {
+  candidate: Candidate | null;
   opportunities: Opportunity[];
   recommendedMatches: any[];
   applications: Application[];
@@ -12,13 +15,17 @@ interface StudentOpportunitiesProps {
 }
 
 export const StudentOpportunities: React.FC<StudentOpportunitiesProps> = ({
+  candidate,
   opportunities,
   recommendedMatches,
   applications,
   onApply,
-  applyingOppId
+  applyingOppId,
+  onSelectForSim
 }) => {
+  const navigate = useNavigate();
   const [filterType, setFilterType] = useState<'all' | 'internship' | 'placement'>('all');
+  const [selectedOppForDetail, setSelectedOppForDetail] = useState<Opportunity | null>(null);
 
   const filteredOpps = opportunities.filter(opp => {
     if (filterType === 'all') return true;
@@ -127,32 +134,59 @@ export const StudentOpportunities: React.FC<StudentOpportunitiesProps> = ({
                   )}
                 </div>
 
-                {/* Application CTA */}
-                <div className="pt-3 border-t border-slate-100 flex items-center justify-between">
+                {/* Application CTA & Detail Modal Action */}
+                <div className="pt-3 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2">
                   <div className="text-[11px] text-slate-500">
                     {appliedApp ? `Applied on ${new Date(appliedApp.applied_at).toLocaleDateString()}` : 'Real-time database submission'}
                   </div>
 
-                  {appliedApp ? (
-                    <div className="flex items-center space-x-2 bg-emerald-50 text-emerald-800 border border-emerald-200 font-bold text-xs px-4 py-1.5 rounded-xl">
-                      <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                      <span>{appliedApp.status.toUpperCase()}</span>
-                    </div>
-                  ) : (
+                  <div className="flex items-center space-x-2">
                     <button
-                      onClick={() => onApply(opp.id)}
-                      disabled={isApplying}
-                      className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs px-5 py-2 rounded-xl transition-all shadow-sm disabled:opacity-50"
+                      onClick={() => setSelectedOppForDetail(opp)}
+                      className="text-xs font-bold text-slate-700 hover:text-indigo-600 bg-slate-50 hover:bg-indigo-50 border border-slate-200 hover:border-indigo-200 px-3 py-1.5 rounded-xl transition-all flex items-center space-x-1"
                     >
-                      {isApplying ? 'Submitting...' : 'Apply Now'}
+                      <Eye className="w-3.5 h-3.5" />
+                      <span>View Details</span>
                     </button>
-                  )}
+
+                    {appliedApp ? (
+                      <div className="flex items-center space-x-2 bg-emerald-50 text-emerald-800 border border-emerald-200 font-bold text-xs px-4 py-1.5 rounded-xl">
+                        <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                        <span>{appliedApp.status.toUpperCase()}</span>
+                      </div>
+                    ) : (
+                      <button
+                        onClick={() => onApply(opp.id)}
+                        disabled={isApplying}
+                        className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs px-5 py-2 rounded-xl transition-all shadow-sm disabled:opacity-50"
+                      >
+                        {isApplying ? 'Submitting...' : 'Apply Now'}
+                      </button>
+                    )}
+                  </div>
                 </div>
               </div>
             );
           })
         )}
       </div>
+
+      {/* Opportunity Detail Modal */}
+      {selectedOppForDetail && (
+        <OpportunityDetailModal
+          opportunity={selectedOppForDetail}
+          candidate={candidate}
+          matchInfo={recommendedMatches.find(m => m.opportunity_id === selectedOppForDetail.id)}
+          application={applications.find(a => a.opportunity_id === selectedOppForDetail.id) || null}
+          onClose={() => setSelectedOppForDetail(null)}
+          onApply={onApply}
+          applyingOppId={applyingOppId}
+          onOpenReadiness={onSelectForSim ? (opp) => {
+            onSelectForSim(opp);
+            navigate('/student/readiness');
+          } : undefined}
+        />
+      )}
     </div>
   );
 };

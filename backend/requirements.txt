@@ -12,3 +12,4 @@ python-multipart==0.0.32
 pyjwt==2.13.0
 passlib==1.7.4
 bcrypt==5.0.0
+psycopg2-binary==2.9.12

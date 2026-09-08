@@ -504,5 +504,18 @@ export const api = {
       body: JSON.stringify(payload || {}),
     });
     return handleResponse(res);
+  },
+
+  // Phase 3: GitHub Repository Evidence Ingestion
+  async analyzeGitHubRepo(
+    candidateId: number,
+    repositoryUrl: string
+  ): Promise<import('../types').GitHubAnalysisResponse> {
+    const res = await fetch(`${API_BASE_URL}/candidates/${candidateId}/github/analyze`, {
+      method: 'POST',
+      headers: getHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ repository_url: repositoryUrl }),
+    });
+    return handleResponse(res);
   }
 };

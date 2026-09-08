@@ -267,12 +267,16 @@ export default function App() {
   const loadStudentData = async (candId: number, targetOpp: Opportunity | null = null) => {
     setLoading(true);
     try {
-      const [elig, matches, apps] = await Promise.all([
+      const [candDetail, elig, matches, apps] = await Promise.all([
+        api.getCandidate(candId).catch(() => null),
         api.getStudentEligibility(candId).catch(() => null),
         api.getCandidateMatches(candId, 'skills_first').catch(() => []),
         api.getCandidateApplications(candId).catch(() => [])
       ]);
       
+      if (candDetail) {
+        setSelectedCandidate(candDetail);
+      }
       setEligibility(elig);
       setRecommendedMatches(matches);
       setApplications(apps);
@@ -350,10 +354,7 @@ export default function App() {
     try {
       await api.uploadResume(selectedCandidate.id, uploadFile);
       showStatus('Resume PDF processed successfully via Gemini AI Extraction.', 'success');
-      setUploadFile(null);
-      const updatedCands = await api.getCandidates();
-      setCandidates(updatedCands);
-      const updatedCand = updatedCands.find(c => c.id === selectedCandidate.id) || selectedCandidate;
+      const updatedCand = await api.getCandidate(selectedCandidate.id);
       setSelectedCandidate(updatedCand);
       await loadStudentData(updatedCand.id, selectedOpportunity);
     } catch (err: any) {
@@ -369,9 +370,7 @@ export default function App() {
     try {
       await api.analyzeCandidate(selectedCandidate.id);
       showStatus('Capability skills successfully discovered and trace-linked.', 'success');
-      const updatedCands = await api.getCandidates();
-      setCandidates(updatedCands);
-      const updatedCand = updatedCands.find(c => c.id === selectedCandidate.id) || selectedCandidate;
+      const updatedCand = await api.getCandidate(selectedCandidate.id);
       setSelectedCandidate(updatedCand);
       await loadStudentData(updatedCand.id, selectedOpportunity);
     } catch (err: any) {
@@ -538,6 +537,7 @@ export default function App() {
             path="opportunities" 
             element={
               <StudentOpportunities 
+                candidate={selectedCandidate}
                 opportunities={opportunities} 
                 recommendedMatches={recommendedMatches} 
                 applications={applications} 

@@ -109,7 +109,7 @@ def run_sqlite_migrations():
 try:
     logger.info("Initializing database schema...")
     run_sqlite_migrations()
-    Base.metadata.create_all(bind=engine)
+    Base.metadata.create_all(bind=engine, checkfirst=True)
     logger.info("Database schema initialized successfully.")
 except Exception as e:
     logger.critical(f"Failed to initialize database schema: {e}")

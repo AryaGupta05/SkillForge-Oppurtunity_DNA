@@ -559,3 +559,33 @@ class TokenResponse(BaseModel):
     user: UserResponse
 
 
+# --- PHASE 3: GITHUB REPOSITORY EVIDENCE INGESTION SCHEMAS ---
+
+class GitHubAnalyzeRequest(BaseModel):
+    repository_url: str = Field(
+        ...,
+        description="Public GitHub repository URL, e.g. https://github.com/owner/repo"
+    )
+
+
+class GitHubAnalyzedSkill(BaseModel):
+    name: str
+    category: str
+    skill_type: str   # explicit | inferred | adjacent
+    proficiency: str
+    confidence: float
+    evidence_count: int  # number of evidence records backing this skill
+    explanation: str
+
+
+class GitHubAnalysisResponse(BaseModel):
+    repository_url: str
+    repository_name: str
+    repository_description: Optional[str] = None
+    primary_language: Optional[str] = None
+    files_analyzed: int
+    total_text_bytes: int
+    evidence_created: int
+    skills_discovered: List[GitHubAnalyzedSkill]
+    dna_updated: bool
+    message: str

@@ -24,6 +24,8 @@ logger = logging.getLogger(__name__)
 
 def seed_sih_demo_dataset():
     run_sqlite_migrations()
+    from backend.app.core.database import Base, engine
+    Base.metadata.create_all(bind=engine, checkfirst=True)
     db = SessionLocal()
     try:
         # ---------------------------------------------------------------------

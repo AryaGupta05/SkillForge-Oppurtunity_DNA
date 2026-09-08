@@ -860,6 +860,241 @@ def analyze_candidate_skills(
         raise HTTPException(status_code=500, detail=f"Failed to analyze skills: {str(e)}")
 
 
+# --- PHASE 3: GITHUB REPOSITORY EVIDENCE INGESTION ---
+
+@api_router.post(
+    "/candidates/{candidate_id}/github/analyze",
+    response_model=schemas.GitHubAnalysisResponse
+)
+def analyze_github_repository(
+    candidate_id: int,
+    payload: schemas.GitHubAnalyzeRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_role("student", active_only=True))
+):
+    """
+    Phase 3: Analyze a public GitHub repository and extract evidence + skills
+    for the authenticated student's own candidate profile.
+
+    - Requires: authenticated active student
+    - Ownership: candidate must belong to the authenticated student
+    - URL: must be a valid public GitHub repository URL
+    - Limits: max 40 files, max 100 KB/file, max ~500 KB total
+    """
+    from backend.app.services.github import GitHubRepoIngestionService, GitHubIngestionError
+    from backend.app.services.analyzer import AIAnalyzerService
+    from backend.app.services.normalization import SkillNormalizer
+    from backend.app.services.dna import DNACalculator
+
+    # 1. Verify candidate exists and belongs to this student
+    candidate = db.query(models.Candidate).filter(models.Candidate.id == candidate_id).first()
+    if not candidate:
+        raise HTTPException(status_code=404, detail="Candidate not found.")
+
+    cand_email = (candidate.email or "").lower().strip()
+    user_email = (current_user.email or "").lower().strip()
+    if candidate.user_id != current_user.id and cand_email != user_email:
+        raise HTTPException(
+            status_code=403,
+            detail="Students are only allowed to analyze their own candidate profile."
+        )
+
+    # 2. Validate the repository URL
+    ingestion_svc = GitHubRepoIngestionService()
+    try:
+        owner, repo_name = GitHubRepoIngestionService.validate_repo_url(payload.repository_url)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # 3. Ingest the repository (fetch metadata + selected files)
+    logger.info(
+        f"[GitHubAnalyze] Student user_id={current_user.id} "
+        f"analyzing {owner}/{repo_name} for candidate {candidate_id}"
+    )
+    try:
+        bundle = ingestion_svc.ingest_repository(payload.repository_url)
+    except GitHubIngestionError as e:
+        raise HTTPException(status_code=e.status_hint, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"[GitHubAnalyze] Unexpected ingestion error: {e}", exc_info=True)
+        raise HTTPException(status_code=502, detail=f"GitHub ingestion failed: {str(e)}")
+
+    files = bundle.get("files", [])
+    if not files:
+        raise HTTPException(
+            status_code=400,
+            detail="No analyzable source files found in the repository."
+        )
+
+    # 4. Create Evidence records (one per file + one for repo metadata)
+    github_evidence_records: list[models.Evidence] = []
+
+    # Repo-level metadata evidence
+    metadata_content = json.dumps({
+        "repository": bundle["repo_name"],
+        "description": bundle.get("description"),
+        "primary_language": bundle.get("primary_language"),
+        "topics": bundle.get("topics", []),
+        "stars": bundle.get("stars", 0),
+        "url": bundle["repository_url"],
+    }, indent=2)
+
+    repo_evidence = models.Evidence(
+        candidate_id=candidate_id,
+        type="github",
+        title=f"GitHub Repository: {bundle['repo_name']}",
+        description=bundle.get("description"),
+        source="GitHub",
+        source_url=bundle.get("html_url", payload.repository_url),
+        date=datetime.utcnow(),
+        raw_content=metadata_content,
+    )
+    db.add(repo_evidence)
+    github_evidence_records.append(repo_evidence)
+
+    # Per-file evidence records
+    for file_info in files:
+        file_ev = models.Evidence(
+            candidate_id=candidate_id,
+            type="github",
+            title=f"{bundle['repo_name']}/{file_info['path']}",
+            description=f"Source file from GitHub repository {bundle['repo_name']}",
+            source="GitHub",
+            source_url=file_info.get("source_url"),
+            date=datetime.utcnow(),
+            raw_content=file_info["content"],
+        )
+        db.add(file_ev)
+        github_evidence_records.append(file_ev)
+
+    try:
+        db.flush()  # assign IDs without committing yet
+    except Exception as e:
+        db.rollback()
+        logger.error(f"[GitHubAnalyze] DB flush error creating evidence: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to save GitHub evidence records.")
+
+    # 5. Run AI skill discovery on the newly created GitHub evidence only
+    try:
+        discovered = AIAnalyzerService.discover_skills_from_evidence(github_evidence_records)
+    except Exception as e:
+        db.rollback()
+        logger.error(f"[GitHubAnalyze] Gemini skill discovery error: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=502,
+            detail=f"AI skill analysis failed: {str(e)}"
+        )
+
+    # 6. Normalize skills, upsert CandidateSkill, recreate SkillEvidence links
+    result_skills: list[schemas.GitHubAnalyzedSkill] = []
+
+    for skill in discovered.skills:
+        # Normalize skill name (deterministic)
+        skill_obj = SkillNormalizer.normalize_and_get_skill(db, skill.name, skill.category)
+
+        # Upsert CandidateSkill
+        cs_entry = db.query(models.CandidateSkill).filter(
+            models.CandidateSkill.candidate_id == candidate_id,
+            models.CandidateSkill.skill_id == skill_obj.id
+        ).first()
+
+        derived_strength = round(skill.confidence * max(1, len(skill.evidence_ids)) * 1.5, 2)
+
+        if cs_entry:
+            # Update only if the new confidence is higher (GitHub evidence is additive)
+            if skill.confidence > cs_entry.confidence:
+                cs_entry.confidence = skill.confidence
+                cs_entry.proficiency = skill.proficiency or cs_entry.proficiency
+            cs_entry.evidence_strength = max(cs_entry.evidence_strength, derived_strength)
+            cs_entry.skill_type = skill.skill_type
+        else:
+            cs_entry = models.CandidateSkill(
+                candidate_id=candidate_id,
+                skill_id=skill_obj.id,
+                confidence=skill.confidence,
+                proficiency=skill.proficiency or "Intermediate",
+                evidence_strength=derived_strength,
+                skill_type=skill.skill_type,
+            )
+            db.add(cs_entry)
+
+        db.flush()
+
+        # Create SkillEvidence links for GitHub evidence records
+        for ev_id in skill.evidence_ids:
+            # Verify the evidence ID belongs to our newly created records
+            ev_exists = next(
+                (e for e in github_evidence_records if e.id == ev_id),
+                None
+            )
+            if ev_exists:
+                # Avoid duplicate links
+                existing_link = db.query(models.SkillEvidence).filter(
+                    models.SkillEvidence.candidate_skill_id == cs_entry.id,
+                    models.SkillEvidence.evidence_id == ev_id
+                ).first()
+                if not existing_link:
+                    link = models.SkillEvidence(
+                        candidate_skill_id=cs_entry.id,
+                        evidence_id=ev_id,
+                        relationship=skill.explanation,
+                        confidence=skill.confidence,
+                    )
+                    db.add(link)
+
+        result_skills.append(schemas.GitHubAnalyzedSkill(
+            name=skill_obj.name,
+            category=skill_obj.category,
+            skill_type=skill.skill_type,
+            proficiency=skill.proficiency or "Intermediate",
+            confidence=round(skill.confidence, 3),
+            evidence_count=len(skill.evidence_ids),
+            explanation=skill.explanation,
+        ))
+
+    # 7. Commit everything
+    try:
+        db.commit()
+        for ev in github_evidence_records:
+            db.refresh(ev)
+    except Exception as e:
+        db.rollback()
+        logger.error(f"[GitHubAnalyze] DB commit error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to persist GitHub analysis results.")
+
+    # 8. Trigger DNA recomputation (read-only — signals are derived on-the-fly)
+    db.refresh(candidate)
+    try:
+        DNACalculator.calculate_profile_dna(candidate, db)
+        dna_updated = True
+    except Exception as e:
+        logger.warning(f"[GitHubAnalyze] DNA recomputation warning: {e}")
+        dna_updated = False
+
+    logger.info(
+        f"[GitHubAnalyze] Complete: {len(github_evidence_records)} evidence records, "
+        f"{len(result_skills)} skills discovered for candidate {candidate_id}"
+    )
+
+    return schemas.GitHubAnalysisResponse(
+        repository_url=payload.repository_url,
+        repository_name=bundle["repo_name"],
+        repository_description=bundle.get("description"),
+        primary_language=bundle.get("primary_language"),
+        files_analyzed=len(files),
+        total_text_bytes=bundle.get("total_text_bytes", 0),
+        evidence_created=len(github_evidence_records),
+        skills_discovered=result_skills,
+        dna_updated=dna_updated,
+        message=(
+            f"Successfully analyzed {bundle['repo_name']}: "
+            f"{len(files)} files, {len(result_skills)} skills discovered."
+        ),
+    )
+
+
 @api_router.get("/candidates/{candidate_id}/evidence", response_model=List[schemas.EvidenceResponse])
 def get_candidate_evidence(
     candidate_id: int,

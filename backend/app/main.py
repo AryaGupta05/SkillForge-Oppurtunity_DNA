@@ -41,7 +41,8 @@ def run_sqlite_migrations():
                 "preferred_location": "TEXT",
                 "is_full_time_student": "INTEGER DEFAULT 0",
                 "is_full_time_employed": "INTEGER DEFAULT 0",
-                "has_prior_nats_naps": "INTEGER DEFAULT 0"
+                "has_prior_nats_naps": "INTEGER DEFAULT 0",
+                "user_id": "INTEGER"
             }
             
             for col, col_type in cand_migrations.items():
@@ -59,13 +60,44 @@ def run_sqlite_migrations():
                 "sector": "TEXT",
                 "allowed_streams": "TEXT",
                 "type": "TEXT DEFAULT 'internship'",
-                "duration_months": "INTEGER"
+                "duration_months": "INTEGER",
+                "posted_by_user_id": "INTEGER"
             }
             
             for col, col_type in opps_migrations.items():
                 if col not in opps_cols:
                     logger.info(f"Adding column '{col}' to opportunities table")
                     cursor.execute(f"ALTER TABLE opportunities ADD COLUMN {col} {col_type}")
+
+            # Check users columns
+            cursor.execute("PRAGMA table_info(users)")
+            users_cols = [row[1] for row in cursor.fetchall()]
+            
+            users_migrations = {
+                "account_status": "TEXT DEFAULT 'active'",
+                "company": "TEXT",
+                "institution": "TEXT",
+                "website": "TEXT",
+                "industry_sector": "TEXT",
+                "organization_type": "TEXT",
+                "designation": "TEXT",
+                "institution_type": "TEXT",
+                "official_domain": "TEXT",
+                "institution_identifier": "TEXT",
+                "graduation_year": "TEXT",
+                "college_id_or_enrollment_number": "TEXT",
+                "email_verified_at": "DATETIME",
+                "verification_requested_at": "DATETIME",
+                "verified_at": "DATETIME",
+                "verified_by_user_id": "INTEGER",
+                "rejection_reason": "TEXT",
+                "suspended_at": "DATETIME"
+            }
+            
+            for col, col_type in users_migrations.items():
+                if col not in users_cols:
+                    logger.info(f"Adding column '{col}' to users table")
+                    cursor.execute(f"ALTER TABLE users ADD COLUMN {col} {col_type}")
                     
             conn.commit()
             conn.close()

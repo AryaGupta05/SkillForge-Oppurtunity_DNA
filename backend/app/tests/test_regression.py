@@ -134,6 +134,8 @@ async def test_resume_upload_atomic_rollback(monkeypatch):
     # 2. Mock Candidate query
     candidate_mock = MagicMock()
     candidate_mock.id = 1
+    candidate_mock.user_id = 1
+    candidate_mock.email = "test@example.com"
     db.query().filter().first.return_value = candidate_mock
     
     # 3. Mock file upload
@@ -153,8 +155,9 @@ async def test_resume_upload_atomic_rollback(monkeypatch):
     monkeypatch.setattr("backend.app.services.analyzer.AIAnalyzerService", MockLLMFailingService)
     
     # 6. Call upload_resume_pdf and assert it raises HTTPException
+    mock_user = MagicMock(id=1, email="test@example.com", role="student", account_status="active")
     with pytest.raises(HTTPException) as exc_info:
-        await upload_resume_pdf(candidate_id=1, file=mock_file, db=db)
+        await upload_resume_pdf(candidate_id=1, file=mock_file, db=db, current_user=mock_user)
         
     # Assertions
     assert exc_info.value.status_code == 500

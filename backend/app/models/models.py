@@ -3,10 +3,80 @@ from sqlalchemy import Column, Integer, String, Float, DateTime, Text, Boolean, 
 from sqlalchemy.orm import relationship
 from backend.app.core.database import Base
 
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, unique=True, index=True, nullable=False)
+    password_hash = Column(String, nullable=False)
+    full_name = Column(String, nullable=False)
+    role = Column(String, nullable=False)  # student, industry, academia, admin
+    is_active = Column(Boolean, default=True, nullable=False)
+    account_status = Column(String, default="active", nullable=False)  # active, pending_email_verification, pending_verification, rejected, suspended
+    company = Column(String, nullable=True)
+    institution = Column(String, nullable=True)
+    website = Column(String, nullable=True)
+    industry_sector = Column(String, nullable=True)
+    organization_type = Column(String, nullable=True)
+    designation = Column(String, nullable=True)
+    institution_type = Column(String, nullable=True)
+    official_domain = Column(String, nullable=True)
+    institution_identifier = Column(String, nullable=True)
+    graduation_year = Column(String, nullable=True)
+    college_id_or_enrollment_number = Column(String, nullable=True)
+    
+    # Verification & Audit Columns
+    email_verified_at = Column(DateTime, nullable=True)
+    verification_requested_at = Column(DateTime, nullable=True)
+    verified_at = Column(DateTime, nullable=True)
+    verified_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    rejection_reason = Column(Text, nullable=True)
+    suspended_at = Column(DateTime, nullable=True)
+    
+    created_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False)
+
+    # Relationships
+    candidate = relationship("Candidate", back_populates="user", uselist=False)
+    posted_opportunities = relationship("Opportunity", back_populates="posted_by_user")
+
+
+class VerificationCode(Base):
+    __tablename__ = "verification_codes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), index=True, nullable=False)
+    code_hash = Column(String, nullable=False)
+    purpose = Column(String, default="email_verification", nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    attempts = Column(Integer, default=0, nullable=False)
+    max_attempts = Column(Integer, default=5, nullable=False)
+    used_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False)
+
+    user = relationship("User", foreign_keys=[user_id])
+
+
+class VerificationAuditLog(Base):
+    __tablename__ = "verification_audit_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    target_user_id = Column(Integer, ForeignKey("users.id"), index=True, nullable=False)
+    admin_user_id = Column(Integer, ForeignKey("users.id"), index=True, nullable=False)
+    action = Column(String, nullable=False)  # approve, reject, suspend, reactivate
+    previous_status = Column(String, nullable=False)
+    new_status = Column(String, nullable=False)
+    reason = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False)
+
+    target_user = relationship("User", foreign_keys=[target_user_id])
+    admin_user = relationship("User", foreign_keys=[admin_user_id])
+
+
 class Candidate(Base):
     __tablename__ = "candidates"
 
     id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     name = Column(String, nullable=False)
     email = Column(String, unique=True, index=True, nullable=False)
     location = Column(String, nullable=True)
@@ -31,6 +101,7 @@ class Candidate(Base):
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
     # Relationships
+    user = relationship("User", back_populates="candidate")
     evidence = relationship("Evidence", back_populates="candidate", cascade="all, delete-orphan")
     skills = relationship("CandidateSkill", back_populates="candidate", cascade="all, delete-orphan")
     assessments = relationship("Assessment", back_populates="candidate", cascade="all, delete-orphan")
@@ -109,6 +180,7 @@ class Opportunity(Base):
     __tablename__ = "opportunities"
 
     id = Column(Integer, primary_key=True, index=True)
+    posted_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     title = Column(String, nullable=False)
     company = Column(String, nullable=False)
     description = Column(Text, nullable=True)
@@ -126,6 +198,7 @@ class Opportunity(Base):
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
     # Relationships
+    posted_by_user = relationship("User", back_populates="posted_opportunities")
     required_skills = relationship("OpportunitySkill", back_populates="opportunity", cascade="all, delete-orphan")
     recommendations = relationship("Recommendation", back_populates="opportunity", cascade="all, delete-orphan")
     bias_audits = relationship("BiasAudit", back_populates="opportunity", cascade="all, delete-orphan")

@@ -52,6 +52,10 @@ def _mock_db():
     return MagicMock()
 
 
+def _make_user(id=1, email="student1@example.com", role="student", account_status="active"):
+    return models.User(id=id, email=email, role=role, account_status=account_status)
+
+
 # ---------------------------------------------------------------------------
 # Test 1: Application Creation
 # ---------------------------------------------------------------------------
@@ -60,7 +64,9 @@ def test_application_creation():
     """Test that a student can apply to an opportunity."""
     db = _mock_db()
     candidate = _make_candidate()
+    candidate.user_id = 1
     opportunity = _make_opportunity()
+    user = _make_user()
     
     def query_side_effect(model):
         q = MagicMock()
@@ -86,7 +92,7 @@ def test_application_creation():
     db.add = lambda item: added_items.append(item)
     
     payload = schemas.ApplicationCreate(candidate_id=1, opportunity_id=1)
-    result = create_application(payload, db)
+    result = create_application(payload, db, current_user=user)
     
     assert len(added_items) == 1
     assert added_items[0].status == "applied"
@@ -105,8 +111,10 @@ def test_duplicate_application_prevention():
     """Test that duplicate applications are rejected with 409."""
     db = _mock_db()
     candidate = _make_candidate()
+    candidate.user_id = 1
     opportunity = _make_opportunity()
     existing_app = _make_application()
+    user = _make_user()
     
     def query_side_effect(model):
         q = MagicMock()
@@ -123,7 +131,7 @@ def test_duplicate_application_prevention():
     
     from fastapi import HTTPException
     with pytest.raises(HTTPException) as exc_info:
-        create_application(payload, db)
+        create_application(payload, db, current_user=user)
     assert exc_info.value.status_code == 409
     assert "already exists" in exc_info.value.detail
 
@@ -136,7 +144,9 @@ def test_candidate_application_listing():
     """Test that applications for a candidate are returned correctly."""
     db = _mock_db()
     candidate = _make_candidate()
+    candidate.user_id = 1
     apps = [_make_application(id=1, status="applied"), _make_application(id=2, status="shortlisted")]
+    user = _make_user()
     
     call_count = [0]
     def query_side_effect(model):
@@ -148,7 +158,7 @@ def test_candidate_application_listing():
         return q
     db.query = query_side_effect
     
-    result = get_candidate_applications(1, db)
+    result = get_candidate_applications(1, db, current_user=user)
     assert len(result) == 2
     assert result[0].status == "applied"
     assert result[1].status == "shortlisted"

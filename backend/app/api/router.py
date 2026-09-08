@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.orm import Session
 from typing import List, Dict, Any, Optional
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 
 from backend.app.core.database import get_db
@@ -10,9 +10,164 @@ from backend.app.models import models
 from backend.app.schemas import schemas
 from backend.app.services.github import GitHubService
 from backend.app.services.pdf import PDFService
+from backend.app.services.email import get_email_service
 
 logger = logging.getLogger(__name__)
 api_router = APIRouter()
+
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from backend.app.core.security import (
+    hash_password, verify_password, create_access_token, decode_access_token,
+    generate_otp, hash_otp, verify_otp_hash
+)
+
+security_bearer = HTTPBearer(auto_error=False)
+
+def get_current_user_optional(
+    auth_credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_bearer),
+    db: Session = Depends(get_db)
+) -> Optional[models.User]:
+    if not auth_credentials or not auth_credentials.credentials:
+        return None
+    token = auth_credentials.credentials
+    payload = decode_access_token(token)
+    if not payload:
+        return None
+    user_id = payload.get("sub")
+    if not user_id:
+        return None
+    try:
+        user_id_int = int(user_id)
+    except (ValueError, TypeError):
+        return None
+    user = db.query(models.User).filter(models.User.id == user_id_int, models.User.is_active == True).first()
+    return user
+
+def get_current_user(
+    user: Optional[models.User] = Depends(get_current_user_optional)
+) -> models.User:
+    if not user:
+        raise HTTPException(
+            status_code=401,
+            detail="Could not validate credentials",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
+    return user
+
+def require_active_user(user: models.User = Depends(get_current_user)) -> models.User:
+    if user.account_status != "active":
+        raise HTTPException(
+            status_code=403,
+            detail=f"Access forbidden: Account status is '{user.account_status}'. Active account required."
+        )
+    return user
+
+def require_role(*allowed_roles: str, active_only: bool = True):
+    def role_checker(user: models.User = Depends(get_current_user)) -> models.User:
+        if user.role not in allowed_roles:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Access forbidden: requires one of roles {list(allowed_roles)}"
+            )
+        if active_only and user.account_status != "active":
+            raise HTTPException(
+                status_code=403,
+                detail=f"Access forbidden: Account status is '{user.account_status}'. Active account required."
+            )
+        return user
+    return role_checker
+
+
+def verify_candidate_access(candidate_id: int, user: models.User, db: Session) -> models.Candidate:
+    candidate = db.query(models.Candidate).filter(models.Candidate.id == candidate_id).first()
+    if not candidate:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+        
+    if user.role == "student":
+        cand_email = (candidate.email or "").lower().strip()
+        user_email = (user.email or "").lower().strip()
+        if candidate.user_id != user.id and cand_email != user_email:
+            raise HTTPException(
+                status_code=403,
+                detail="Students are only allowed to access their own candidate data."
+            )
+            
+    return candidate
+
+
+def build_user_response(user: models.User, db: Session) -> schemas.UserResponse:
+    candidate_id = None
+    if user.role == "student":
+        cand = db.query(models.Candidate).filter(
+            (models.Candidate.user_id == user.id) | (models.Candidate.email == user.email)
+        ).first()
+        if cand:
+            candidate_id = cand.id
+
+    return schemas.UserResponse(
+        id=user.id,
+        email=user.email,
+        full_name=user.full_name,
+        role=user.role,
+        is_active=user.is_active,
+        account_status=user.account_status or "active",
+        created_at=user.created_at,
+        candidate_id=candidate_id,
+        company=user.company,
+        institution=user.institution,
+        website=user.website,
+        industry_sector=user.industry_sector,
+        organization_type=user.organization_type,
+        designation=user.designation,
+        institution_type=user.institution_type,
+        official_domain=user.official_domain,
+        institution_identifier=user.institution_identifier,
+        graduation_year=user.graduation_year,
+        college_id_or_enrollment_number=user.college_id_or_enrollment_number,
+        email_verified_at=user.email_verified_at,
+        verification_requested_at=user.verification_requested_at,
+        verified_at=user.verified_at,
+        verified_by_user_id=user.verified_by_user_id,
+        rejection_reason=user.rejection_reason,
+        suspended_at=user.suspended_at
+    )
+
+
+def create_and_send_otp(user: models.User, db: Session) -> None:
+    """Invalidate prior active OTPs, generate a cryptographically secure 6-digit OTP, store HMAC hash, and send email."""
+    # Invalidate prior active OTPs
+    db.query(models.VerificationCode).filter(
+        models.VerificationCode.user_id == user.id,
+        models.VerificationCode.purpose == "email_verification",
+        models.VerificationCode.used_at == None
+    ).update({"used_at": datetime.utcnow()}, synchronize_session=False)
+
+    raw_otp = generate_otp()
+    code_hash = hash_otp(raw_otp)
+    expires_at = datetime.utcnow() + timedelta(minutes=10)
+
+    ver_code = models.VerificationCode(
+        user_id=user.id,
+        code_hash=code_hash,
+        purpose="email_verification",
+        expires_at=expires_at,
+        attempts=0,
+        max_attempts=5
+    )
+    db.add(ver_code)
+    db.commit()
+
+    try:
+        email_service = get_email_service()
+        email_service.send_verification_otp(user.email, user.full_name, raw_otp)
+    except Exception as e:
+        logger.error(f"Failed to send OTP email to {user.email}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to send verification email: {str(e)}"
+        )
+
+
 
 def parse_date_string(date_str: Optional[str]) -> Optional[datetime]:
     if not date_str:
@@ -34,9 +189,444 @@ def health_check():
     return {"status": "ok", "timestamp": str(datetime.utcnow())}
 
 
+# --- AUTHENTICATION API ---
+@api_router.post("/auth/register/student", response_model=schemas.TokenResponse, status_code=201)
+def register_student(payload: schemas.StudentRegisterRequest, db: Session = Depends(get_db)):
+    email_clean = payload.email.lower().strip()
+    existing_user = db.query(models.User).filter(models.User.email == email_clean).first()
+    if existing_user:
+        raise HTTPException(status_code=400, detail="User with this email already exists.")
+
+    pwd_hash = hash_password(payload.password)
+    new_user = models.User(
+        email=email_clean,
+        password_hash=pwd_hash,
+        full_name=payload.full_name,
+        role="student",
+        account_status="pending_email_verification",
+        institution=payload.institution,
+        graduation_year=payload.graduation_year,
+        college_id_or_enrollment_number=payload.college_id_or_enrollment_number
+    )
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+
+    cand = db.query(models.Candidate).filter(models.Candidate.email == email_clean).first()
+    if not cand:
+        cand = models.Candidate(
+            name=payload.full_name,
+            email=email_clean,
+            user_id=new_user.id,
+            institution=payload.institution,
+            highest_degree=payload.degree
+        )
+        db.add(cand)
+        db.commit()
+        db.refresh(cand)
+    else:
+        cand.user_id = new_user.id
+        if payload.institution:
+            cand.institution = payload.institution
+        db.commit()
+
+    create_and_send_otp(new_user, db)
+    token = create_access_token({"sub": str(new_user.id), "role": new_user.role, "email": new_user.email})
+    return schemas.TokenResponse(access_token=token, token_type="bearer", user=build_user_response(new_user, db))
+
+
+@api_router.post("/auth/register/industry", response_model=schemas.TokenResponse, status_code=201)
+def register_industry(payload: schemas.IndustryRegisterRequest, db: Session = Depends(get_db)):
+    email_clean = payload.email.lower().strip()
+    existing_user = db.query(models.User).filter(models.User.email == email_clean).first()
+    if existing_user:
+        raise HTTPException(status_code=400, detail="User with this email already exists.")
+
+    pwd_hash = hash_password(payload.password)
+    new_user = models.User(
+        email=email_clean,
+        password_hash=pwd_hash,
+        full_name=payload.full_name,
+        role="industry",
+        account_status="pending_email_verification",
+        company=payload.company_name,
+        website=payload.website,
+        industry_sector=payload.industry_sector,
+        organization_type=payload.organization_type,
+        designation=payload.designation
+    )
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+
+    create_and_send_otp(new_user, db)
+    token = create_access_token({"sub": str(new_user.id), "role": new_user.role, "email": new_user.email})
+    return schemas.TokenResponse(access_token=token, token_type="bearer", user=build_user_response(new_user, db))
+
+
+@api_router.post("/auth/register/academia", response_model=schemas.TokenResponse, status_code=201)
+def register_academia(payload: schemas.AcademiaRegisterRequest, db: Session = Depends(get_db)):
+    email_clean = payload.email.lower().strip()
+    existing_user = db.query(models.User).filter(models.User.email == email_clean).first()
+    if existing_user:
+        raise HTTPException(status_code=400, detail="User with this email already exists.")
+
+    pwd_hash = hash_password(payload.password)
+    new_user = models.User(
+        email=email_clean,
+        password_hash=pwd_hash,
+        full_name=payload.full_name,
+        role="academia",
+        account_status="pending_email_verification",
+        institution=payload.institution_name,
+        website=payload.website,
+        institution_type=payload.institution_type,
+        official_domain=payload.official_domain,
+        designation=payload.designation,
+        institution_identifier=payload.institution_identifier
+    )
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+
+    create_and_send_otp(new_user, db)
+    token = create_access_token({"sub": str(new_user.id), "role": new_user.role, "email": new_user.email})
+    return schemas.TokenResponse(access_token=token, token_type="bearer", user=build_user_response(new_user, db))
+
+
+@api_router.post("/auth/register", response_model=schemas.TokenResponse, status_code=201)
+def register_user(payload: schemas.UserRegisterRequest, db: Session = Depends(get_db)):
+    email_clean = payload.email.lower().strip()
+    existing_user = db.query(models.User).filter(models.User.email == email_clean).first()
+    if existing_user:
+        raise HTTPException(status_code=400, detail="User with this email already exists.")
+    
+    role_clean = payload.role.lower().strip()
+    if role_clean not in ["student", "industry", "academia"]:
+        raise HTTPException(status_code=400, detail="Invalid role. Must be 'student', 'industry', or 'academia'.")
+        
+    pwd_hash = hash_password(payload.password)
+    new_user = models.User(
+        email=email_clean,
+        password_hash=pwd_hash,
+        full_name=payload.full_name,
+        role=role_clean,
+        account_status="pending_email_verification",
+        company=payload.company,
+        institution=payload.institution,
+        college_id_or_enrollment_number=payload.college_id_or_enrollment_number
+    )
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+
+    if role_clean == "student":
+        cand = db.query(models.Candidate).filter(models.Candidate.email == email_clean).first()
+        if not cand:
+            cand = models.Candidate(
+                name=payload.full_name,
+                email=email_clean,
+                user_id=new_user.id,
+                location=payload.location,
+                institution=payload.institution,
+                highest_degree=payload.highest_degree,
+                qualification_stream=payload.qualification_stream,
+                preferred_sector=payload.preferred_sector
+            )
+            db.add(cand)
+            db.commit()
+            db.refresh(cand)
+        else:
+            cand.user_id = new_user.id
+            db.commit()
+
+    create_and_send_otp(new_user, db)
+    token = create_access_token({"sub": str(new_user.id), "role": new_user.role, "email": new_user.email})
+    return schemas.TokenResponse(access_token=token, token_type="bearer", user=build_user_response(new_user, db))
+
+
+@api_router.post("/auth/verify-email", response_model=schemas.TokenResponse)
+def verify_email(payload: schemas.VerifyEmailRequest, db: Session = Depends(get_db)):
+    email_clean = payload.email.lower().strip()
+    user = db.query(models.User).filter(models.User.email == email_clean).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User account not found.")
+
+    ver_code = db.query(models.VerificationCode).filter(
+        models.VerificationCode.user_id == user.id,
+        models.VerificationCode.purpose == "email_verification",
+        models.VerificationCode.used_at == None
+    ).order_by(models.VerificationCode.created_at.desc()).first()
+
+    if not ver_code or ver_code.expires_at < datetime.utcnow():
+        raise HTTPException(status_code=400, detail="Verification code has expired or is invalid. Please request a new code.")
+
+    if ver_code.attempts >= ver_code.max_attempts:
+        raise HTTPException(status_code=400, detail="Maximum verification attempts exceeded. Please request a new code.")
+
+    if not verify_otp_hash(payload.otp, ver_code.code_hash):
+        ver_code.attempts += 1
+        db.commit()
+        raise HTTPException(status_code=400, detail="Invalid verification code.")
+
+    # OTP is valid
+    ver_code.used_at = datetime.utcnow()
+    user.email_verified_at = datetime.utcnow()
+
+    # Status transition
+    if user.role == "student":
+        user.account_status = "active"
+    elif user.role in ["industry", "academia"]:
+        user.account_status = "pending_verification"
+        user.verification_requested_at = datetime.utcnow()
+
+    db.commit()
+    db.refresh(user)
+
+    token = create_access_token({"sub": str(user.id), "role": user.role, "email": user.email})
+    return schemas.TokenResponse(access_token=token, token_type="bearer", user=build_user_response(user, db))
+
+
+@api_router.post("/auth/resend-verification")
+def resend_verification(payload: schemas.ResendVerificationRequest, db: Session = Depends(get_db)):
+    email_clean = payload.email.lower().strip()
+    user = db.query(models.User).filter(models.User.email == email_clean).first()
+    if not user:
+        return {"status": "ok", "message": "If an unverified account exists, a new verification code has been sent."}
+
+    if user.account_status != "pending_email_verification":
+        return {"status": "ok", "message": "Email is already verified."}
+
+    # Cooldown check (60 seconds)
+    latest_code = db.query(models.VerificationCode).filter(
+        models.VerificationCode.user_id == user.id,
+        models.VerificationCode.purpose == "email_verification"
+    ).order_by(models.VerificationCode.created_at.desc()).first()
+
+    if latest_code and (datetime.utcnow() - latest_code.created_at).total_seconds() < 60:
+        raise HTTPException(status_code=429, detail="Please wait 60 seconds before requesting another code.")
+
+    create_and_send_otp(user, db)
+    return {"status": "ok", "message": "A new verification code has been sent to your email."}
+
+
+@api_router.post("/auth/login", response_model=schemas.TokenResponse)
+def login_user(payload: schemas.UserLoginRequest, db: Session = Depends(get_db)):
+    email_clean = payload.email.lower().strip()
+    user = db.query(models.User).filter(models.User.email == email_clean).first()
+    if not user or not verify_password(payload.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    
+    if not user.is_active:
+        raise HTTPException(status_code=401, detail="User account is inactive")
+        
+    if user.account_status == "rejected":
+        reason = user.rejection_reason or "Registration was not approved by platform administrator."
+        raise HTTPException(status_code=403, detail=f"Account registration was rejected. Reason: {reason}")
+
+    if user.account_status == "suspended":
+        raise HTTPException(status_code=403, detail="Account has been suspended by platform administrator.")
+
+    token = create_access_token({"sub": str(user.id), "role": user.role, "email": user.email})
+    return schemas.TokenResponse(access_token=token, token_type="bearer", user=build_user_response(user, db))
+
+
+# --- ADMIN PLATFORM VERIFICATION ENDPOINTS ---
+@api_router.get("/admin/verifications", response_model=List[schemas.UserResponse])
+def get_admin_verifications(
+    db: Session = Depends(get_db),
+    admin_user: models.User = Depends(require_role("admin"))
+):
+    """Retrieve all Industry and Academia accounts awaiting platform verification."""
+    users = db.query(models.User).filter(
+        models.User.account_status == "pending_verification"
+    ).order_by(models.User.verification_requested_at.desc()).all()
+    return [build_user_response(u, db) for u in users]
+
+
+@api_router.get("/admin/users", response_model=List[schemas.UserResponse])
+def get_admin_users(
+    role: Optional[str] = None,
+    status: Optional[str] = None,
+    db: Session = Depends(get_db),
+    admin_user: models.User = Depends(require_role("admin"))
+):
+    """Retrieve all platform accounts with optional role and status filters."""
+    query = db.query(models.User)
+    if role:
+        query = query.filter(models.User.role == role.lower().strip())
+    if status:
+        query = query.filter(models.User.account_status == status.lower().strip())
+    users = query.order_by(models.User.created_at.desc()).all()
+    return [build_user_response(u, db) for u in users]
+
+
+@api_router.get("/admin/audit-logs", response_model=List[schemas.VerificationAuditLogResponse])
+def get_admin_audit_logs(
+    db: Session = Depends(get_db),
+    admin_user: models.User = Depends(require_role("admin"))
+):
+    """Retrieve full platform verification audit logs."""
+    logs = db.query(models.VerificationAuditLog).order_by(models.VerificationAuditLog.created_at.desc()).all()
+    return logs
+
+
+@api_router.get("/admin/users/{user_id}/audit-logs", response_model=List[schemas.VerificationAuditLogResponse])
+def get_user_audit_logs(
+    user_id: int,
+    db: Session = Depends(get_db),
+    admin_user: models.User = Depends(require_role("admin"))
+):
+    """Retrieve audit history for a specific target user."""
+    logs = db.query(models.VerificationAuditLog).filter(
+        models.VerificationAuditLog.target_user_id == user_id
+    ).order_by(models.VerificationAuditLog.created_at.desc()).all()
+    return logs
+
+
+@api_router.patch("/admin/users/{user_id}/approve", response_model=schemas.UserResponse)
+def approve_user(
+    user_id: int,
+    payload: Optional[schemas.ApproveUserRequest] = None,
+    db: Session = Depends(get_db),
+    admin_user: models.User = Depends(require_role("admin"))
+):
+    """Approve a pending Industry or Academia organization account."""
+    target_user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not target_user:
+        raise HTTPException(status_code=404, detail="Target user not found.")
+
+    prev_status = target_user.account_status
+    target_user.account_status = "active"
+    target_user.verified_at = datetime.utcnow()
+    target_user.verified_by_user_id = admin_user.id
+
+    audit_log = models.VerificationAuditLog(
+        target_user_id=target_user.id,
+        admin_user_id=admin_user.id,
+        action="approve",
+        previous_status=prev_status,
+        new_status="active",
+        reason=payload.notes if payload else None
+    )
+    db.add(audit_log)
+    db.commit()
+    db.refresh(target_user)
+    return build_user_response(target_user, db)
+
+
+@api_router.patch("/admin/users/{user_id}/reject", response_model=schemas.UserResponse)
+def reject_user(
+    user_id: int,
+    payload: schemas.RejectUserRequest,
+    db: Session = Depends(get_db),
+    admin_user: models.User = Depends(require_role("admin"))
+):
+    """Reject a pending Industry or Academia organization account with mandatory reason and send rejection email."""
+    target_user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not target_user:
+        raise HTTPException(status_code=404, detail="Target user not found.")
+
+    prev_status = target_user.account_status
+    target_user.account_status = "rejected"
+    target_user.rejection_reason = payload.rejection_reason
+
+    audit_log = models.VerificationAuditLog(
+        target_user_id=target_user.id,
+        admin_user_id=admin_user.id,
+        action="reject",
+        previous_status=prev_status,
+        new_status="rejected",
+        reason=payload.rejection_reason
+    )
+    db.add(audit_log)
+    db.commit()
+    db.refresh(target_user)
+
+    # Dispatch rejection email via EmailService
+    try:
+        org_name = target_user.company or target_user.institution or "Organization"
+        email_service = get_email_service()
+        email_service.send_verification_rejection(target_user.email, target_user.full_name, org_name, payload.rejection_reason)
+    except Exception as e:
+        logger.error(f"Failed to send rejection email to {target_user.email}: {e}")
+
+    return build_user_response(target_user, db)
+
+
+@api_router.patch("/admin/users/{user_id}/suspend", response_model=schemas.UserResponse)
+def suspend_user(
+    user_id: int,
+    payload: Optional[schemas.SuspendUserRequest] = None,
+    db: Session = Depends(get_db),
+    admin_user: models.User = Depends(require_role("admin"))
+):
+    """Suspend an active platform account."""
+    target_user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not target_user:
+        raise HTTPException(status_code=404, detail="Target user not found.")
+
+    prev_status = target_user.account_status
+    target_user.account_status = "suspended"
+    target_user.suspended_at = datetime.utcnow()
+
+    audit_log = models.VerificationAuditLog(
+        target_user_id=target_user.id,
+        admin_user_id=admin_user.id,
+        action="suspend",
+        previous_status=prev_status,
+        new_status="suspended",
+        reason=payload.reason if payload else None
+    )
+    db.add(audit_log)
+    db.commit()
+    db.refresh(target_user)
+    return build_user_response(target_user, db)
+
+
+@api_router.patch("/admin/users/{user_id}/reactivate", response_model=schemas.UserResponse)
+def reactivate_user(
+    user_id: int,
+    payload: Optional[schemas.SuspendUserRequest] = None,
+    db: Session = Depends(get_db),
+    admin_user: models.User = Depends(require_role("admin"))
+):
+    """Reactivate a suspended or rejected platform account."""
+    target_user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not target_user:
+        raise HTTPException(status_code=404, detail="Target user not found.")
+
+    prev_status = target_user.account_status
+    target_user.account_status = "active"
+
+    audit_log = models.VerificationAuditLog(
+        target_user_id=target_user.id,
+        admin_user_id=admin_user.id,
+        action="reactivate",
+        previous_status=prev_status,
+        new_status="active",
+        reason=payload.reason if payload else None
+    )
+    db.add(audit_log)
+    db.commit()
+    db.refresh(target_user)
+    return build_user_response(target_user, db)
+
+
+
+@api_router.get("/auth/me", response_model=schemas.UserResponse)
+def get_auth_me(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return build_user_response(current_user, db)
+
+
+
 # --- CANDIDATES API ---
 @api_router.post("/candidates", response_model=schemas.CandidateResponse)
-def create_candidate(candidate: schemas.CandidateCreate, db: Session = Depends(get_db)):
+def create_candidate(
+    candidate: schemas.CandidateCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_active_user)
+):
     # Check if email exists
     db_candidate = db.query(models.Candidate).filter(models.Candidate.email == candidate.email).first()
     if db_candidate:
@@ -69,21 +659,29 @@ def create_candidate(candidate: schemas.CandidateCreate, db: Session = Depends(g
 
 
 @api_router.get("/candidates", response_model=List[schemas.CandidateResponse])
-def get_candidates(db: Session = Depends(get_db)):
+def get_candidates(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_role("industry", "academia", "admin"))
+):
     return db.query(models.Candidate).all()
 
 
 @api_router.get("/candidates/{candidate_id}", response_model=schemas.CandidateResponse)
-def get_candidate(candidate_id: int, db: Session = Depends(get_db)):
-    candidate = db.query(models.Candidate).filter(models.Candidate.id == candidate_id).first()
-    if not candidate:
-        raise HTTPException(status_code=404, detail="Candidate not found")
-    return candidate
+def get_candidate(
+    candidate_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_active_user)
+):
+    return verify_candidate_access(candidate_id, current_user, db)
 
 
 # --- SKILLS SEED/CREATE (helper) ---
 @api_router.post("/skills", response_model=schemas.SkillResponse)
-def create_skill(skill: schemas.SkillCreate, db: Session = Depends(get_db)):
+def create_skill(
+    skill: schemas.SkillCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_role("industry", "academia", "admin"))
+):
     db_skill = db.query(models.Skill).filter(models.Skill.name == skill.name).first()
     if db_skill:
         return db_skill
@@ -99,16 +697,22 @@ def create_skill(skill: schemas.SkillCreate, db: Session = Depends(get_db)):
 
 
 @api_router.get("/skills", response_model=List[schemas.SkillResponse])
-def get_skills(db: Session = Depends(get_db)):
+def get_skills(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_active_user)
+):
     return db.query(models.Skill).all()
 
 
 # --- EVIDENCE UPLOAD AND SYNCS ---
 @api_router.post("/candidates/{candidate_id}/resume", response_model=List[schemas.EvidenceResponse])
-async def upload_resume_pdf(candidate_id: int, file: UploadFile = File(...), db: Session = Depends(get_db)):
-    candidate = db.query(models.Candidate).filter(models.Candidate.id == candidate_id).first()
-    if not candidate:
-        raise HTTPException(status_code=404, detail="Candidate not found")
+async def upload_resume_pdf(
+    candidate_id: int,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_active_user)
+):
+    candidate = verify_candidate_access(candidate_id, current_user, db)
 
     if not file.filename.endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF resumes are supported.")
@@ -165,10 +769,12 @@ async def upload_resume_pdf(candidate_id: int, file: UploadFile = File(...), db:
 
 
 @api_router.post("/candidates/{candidate_id}/analyze", response_model=List[schemas.CandidateSkillResponse])
-def analyze_candidate_skills(candidate_id: int, db: Session = Depends(get_db)):
-    candidate = db.query(models.Candidate).filter(models.Candidate.id == candidate_id).first()
-    if not candidate:
-        raise HTTPException(status_code=404, detail="Candidate not found")
+def analyze_candidate_skills(
+    candidate_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_active_user)
+):
+    candidate = verify_candidate_access(candidate_id, current_user, db)
         
     evidence_list = db.query(models.Evidence).filter(models.Evidence.candidate_id == candidate_id).all()
     if not evidence_list:
@@ -255,26 +861,32 @@ def analyze_candidate_skills(candidate_id: int, db: Session = Depends(get_db)):
 
 
 @api_router.get("/candidates/{candidate_id}/evidence", response_model=List[schemas.EvidenceResponse])
-def get_candidate_evidence(candidate_id: int, db: Session = Depends(get_db)):
-    candidate = db.query(models.Candidate).filter(models.Candidate.id == candidate_id).first()
-    if not candidate:
-        raise HTTPException(status_code=404, detail="Candidate not found")
+def get_candidate_evidence(
+    candidate_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_active_user)
+):
+    candidate = verify_candidate_access(candidate_id, current_user, db)
     return db.query(models.Evidence).filter(models.Evidence.candidate_id == candidate_id).all()
 
 
 @api_router.get("/candidates/{candidate_id}/skills", response_model=List[schemas.CandidateSkillResponse])
-def get_candidate_skills(candidate_id: int, db: Session = Depends(get_db)):
-    candidate = db.query(models.Candidate).filter(models.Candidate.id == candidate_id).first()
-    if not candidate:
-        raise HTTPException(status_code=404, detail="Candidate not found")
+def get_candidate_skills(
+    candidate_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_active_user)
+):
+    candidate = verify_candidate_access(candidate_id, current_user, db)
     return db.query(models.CandidateSkill).filter(models.CandidateSkill.candidate_id == candidate_id).all()
 
 
 @api_router.get("/candidates/{candidate_id}/dna", response_model=schemas.OpportunityDNAProfileResponse)
-def get_candidate_dna_profile(candidate_id: int, db: Session = Depends(get_db)):
-    candidate = db.query(models.Candidate).filter(models.Candidate.id == candidate_id).first()
-    if not candidate:
-        raise HTTPException(status_code=404, detail="Candidate not found")
+def get_candidate_dna_profile(
+    candidate_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_active_user)
+):
+    candidate = verify_candidate_access(candidate_id, current_user, db)
         
     from backend.app.services.dna import DNACalculator
     signals = DNACalculator.calculate_profile_dna(candidate, db)
@@ -289,7 +901,13 @@ def get_candidate_dna_profile(candidate_id: int, db: Session = Depends(get_db)):
 
 
 @api_router.get("/candidates/{candidate_id}/skills/{skill_id}/evidence", response_model=List[schemas.SkillEvidenceResponse])
-def get_skill_backing_evidence(candidate_id: int, skill_id: int, db: Session = Depends(get_db)):
+def get_skill_backing_evidence(
+    candidate_id: int,
+    skill_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_active_user)
+):
+    verify_candidate_access(candidate_id, current_user, db)
     cand_skill = db.query(models.CandidateSkill).filter(
         models.CandidateSkill.candidate_id == candidate_id,
         models.CandidateSkill.skill_id == skill_id
@@ -304,10 +922,12 @@ def get_skill_backing_evidence(candidate_id: int, skill_id: int, db: Session = D
 
 
 @api_router.post("/candidates/{candidate_id}/github/sync", response_model=List[schemas.EvidenceResponse])
-def sync_github(candidate_id: int, db: Session = Depends(get_db)):
-    candidate = db.query(models.Candidate).filter(models.Candidate.id == candidate_id).first()
-    if not candidate:
-        raise HTTPException(status_code=404, detail="Candidate not found")
+def sync_github(
+    candidate_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_active_user)
+):
+    candidate = verify_candidate_access(candidate_id, current_user, db)
     
     if not candidate.github_url:
         raise HTTPException(status_code=400, detail="Candidate does not have a GitHub URL profile configured.")
@@ -353,9 +973,12 @@ def sync_github(candidate_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"Failed to sync GitHub: {str(e)}")
 
 
-# --- OPPORTUNITIES API ---
 @api_router.post("/opportunities", response_model=schemas.OpportunityResponse)
-def create_opportunity(opportunity: schemas.OpportunityCreate, db: Session = Depends(get_db)):
+def create_opportunity(
+    opportunity: schemas.OpportunityCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_role("industry", "admin"))
+):
     new_opp = models.Opportunity(
         title=opportunity.title,
         company=opportunity.company,
@@ -363,7 +986,8 @@ def create_opportunity(opportunity: schemas.OpportunityCreate, db: Session = Dep
         stipend=opportunity.stipend,
         location=opportunity.location,
         sector=opportunity.sector,
-        allowed_streams=opportunity.allowed_streams
+        allowed_streams=opportunity.allowed_streams,
+        posted_by_user_id=current_user.id
     )
     db.add(new_opp)
     db.commit()
@@ -384,12 +1008,19 @@ def create_opportunity(opportunity: schemas.OpportunityCreate, db: Session = Dep
 
 
 @api_router.get("/opportunities", response_model=List[schemas.OpportunityResponse])
-def get_opportunities(db: Session = Depends(get_db)):
+def get_opportunities(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_active_user)
+):
     return db.query(models.Opportunity).all()
 
 
 @api_router.get("/opportunities/{opportunity_id}", response_model=schemas.OpportunityResponse)
-def get_opportunity(opportunity_id: int, db: Session = Depends(get_db)):
+def get_opportunity(
+    opportunity_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_active_user)
+):
     opp = db.query(models.Opportunity).filter(models.Opportunity.id == opportunity_id).first()
     if not opp:
         raise HTTPException(status_code=404, detail="Opportunity not found")
@@ -398,7 +1029,12 @@ def get_opportunity(opportunity_id: int, db: Session = Depends(get_db)):
 
 # --- MATCHING ENGINE (SKELETON) ---
 @api_router.post("/matching/match", response_model=schemas.RecommendationResponse)
-def match_candidate(candidate_id: int, opportunity_id: int, db: Session = Depends(get_db)):
+def match_candidate(
+    candidate_id: int,
+    opportunity_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_role("industry", "academia", "admin"))
+):
     """
     Perform a clean, mathematical skill overlap calculation.
     Looks at candidate skills vs opportunity required skills.
@@ -467,7 +1103,12 @@ def match_candidate(candidate_id: int, opportunity_id: int, db: Session = Depend
 
 # --- BIAS AUDIT (SKELETON) ---
 @api_router.get("/matching/audit/{candidate_id}/{opportunity_id}", response_model=schemas.BiasAuditResponse)
-def audit_bias(candidate_id: int, opportunity_id: int, db: Session = Depends(get_db)):
+def audit_bias(
+    candidate_id: int,
+    opportunity_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_role("industry", "academia", "admin"))
+):
     """
     Returns a BiasAudit evaluation.
     Calculates differences when pedigree and location proxies are eliminated.
@@ -477,19 +1118,6 @@ def audit_bias(candidate_id: int, opportunity_id: int, db: Session = Depends(get
     if not candidate:
         raise HTTPException(status_code=404, detail="Candidate not found")
 
-    # In a full run, we would re-run matching without college/institution/location variables.
-    # For now, we compare full credentials vs. skills-first evidence.
-    # If the candidate has a career gap or non-pedigree college, normal models might penalize them, 
-    # but the blind matching keeps score identical.
-    
-    # Simple check for demo: if candidate is from a non-elite institution, normal scoring in conventional
-    # ATS systems penalizes them, whereas blind skills-first matching boosts them.
-    # We will simulate this by checking if institutional prestige plays a part (normal score might be 
-    # lower if college is listed, while blind score is purely skills-based).
-    # Since we don't have a real legacy parser, we set both based on skills match.
-    # If institution is present, let's suggest it could act as a proxy.
-    
-    # Retrieve match record if exists, otherwise generate score
     rec = db.query(models.Recommendation).filter(
         models.Recommendation.candidate_id == candidate_id,
         models.Recommendation.opportunity_id == opportunity_id
@@ -497,8 +1125,6 @@ def audit_bias(candidate_id: int, opportunity_id: int, db: Session = Depends(get
 
     score = rec.match_score if rec else 0.5
     
-    # Simple simulation: let's say without the college proxy, candidate ranking increases or remains steady.
-    # If institution is present, we identify it as an audited proxy attribute.
     affected = []
     explanation = "Skills-first evaluation shows no change because demographics are excluded from match scoring."
     risk_level = "low"
@@ -538,7 +1164,11 @@ def audit_bias(candidate_id: int, opportunity_id: int, db: Session = Depends(get
 # --- PHASE 3: OPPORTUNITY MATCHING & COMPARISON API ---
 
 @api_router.post("/opportunities/{opportunity_id}/analyze", response_model=List[schemas.OpportunitySkillResponse])
-def analyze_opportunity_requirements(opportunity_id: int, db: Session = Depends(get_db)):
+def analyze_opportunity_requirements(
+    opportunity_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_role("industry", "admin"))
+):
     opp = db.query(models.Opportunity).filter(models.Opportunity.id == opportunity_id).first()
     if not opp:
         raise HTTPException(status_code=404, detail="Opportunity not found")
@@ -591,7 +1221,11 @@ def analyze_opportunity_requirements(opportunity_id: int, db: Session = Depends(
 
 
 @api_router.get("/opportunities/{opportunity_id}/skills", response_model=List[schemas.OpportunitySkillResponse])
-def get_opportunity_skills(opportunity_id: int, db: Session = Depends(get_db)):
+def get_opportunity_skills(
+    opportunity_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_active_user)
+):
     opp = db.query(models.Opportunity).filter(models.Opportunity.id == opportunity_id).first()
     if not opp:
         raise HTTPException(status_code=404, detail="Opportunity not found")
@@ -599,7 +1233,13 @@ def get_opportunity_skills(opportunity_id: int, db: Session = Depends(get_db)):
 
 
 @api_router.post("/opportunities/{opportunity_id}/match", response_model=schemas.CandidateMatchResultOut)
-def match_candidate_to_job(opportunity_id: int, candidate_id: int, mode: str = "skills_first", db: Session = Depends(get_db)):
+def match_candidate_to_job(
+    opportunity_id: int,
+    candidate_id: int,
+    mode: str = "skills_first",
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_role("industry", "academia", "admin"))
+):
     candidate = db.query(models.Candidate).filter(models.Candidate.id == candidate_id).first()
     opp = db.query(models.Opportunity).filter(models.Opportunity.id == opportunity_id).first()
     if not candidate or not opp:
@@ -628,7 +1268,12 @@ def match_candidate_to_job(opportunity_id: int, candidate_id: int, mode: str = "
 
 
 @api_router.get("/opportunities/{opportunity_id}/matches", response_model=List[schemas.CandidateMatchResultOut])
-def get_ranked_opportunity_matches(opportunity_id: int, mode: str = "skills_first", db: Session = Depends(get_db)):
+def get_ranked_opportunity_matches(
+    opportunity_id: int,
+    mode: str = "skills_first",
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_role("industry", "academia", "admin"))
+):
     opp = db.query(models.Opportunity).filter(models.Opportunity.id == opportunity_id).first()
     if not opp:
         raise HTTPException(status_code=404, detail="Opportunity not found")
@@ -652,10 +1297,13 @@ def get_ranked_opportunity_matches(opportunity_id: int, mode: str = "skills_firs
 
 
 @api_router.get("/candidates/{candidate_id}/matches")
-def get_ranked_candidate_matches(candidate_id: int, mode: str = "skills_first", db: Session = Depends(get_db)):
-    candidate = db.query(models.Candidate).filter(models.Candidate.id == candidate_id).first()
-    if not candidate:
-        raise HTTPException(status_code=404, detail="Candidate not found")
+def get_ranked_candidate_matches(
+    candidate_id: int,
+    mode: str = "skills_first",
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_active_user)
+):
+    candidate = verify_candidate_access(candidate_id, current_user, db)
         
     opportunities = db.query(models.Opportunity).all()
     from backend.app.services.matcher import MatchingEngine
@@ -686,7 +1334,11 @@ class ComparePayload(schemas.BaseModel):
     mode: str = "skills_first"
 
 @api_router.post("/matching/compare", response_model=schemas.CompareCandidatesResponse)
-def compare_candidates_for_job(payload: ComparePayload, db: Session = Depends(get_db)):
+def compare_candidates_for_job(
+    payload: ComparePayload,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_role("industry", "academia", "admin"))
+):
     opp = db.query(models.Opportunity).filter(models.Opportunity.id == payload.opportunity_id).first()
     if not opp:
         raise HTTPException(status_code=404, detail="Opportunity not found")
@@ -717,7 +1369,11 @@ def compare_candidates_for_job(payload: ComparePayload, db: Session = Depends(ge
 # --- PHASE 4: BIAS AUDITING & COUNTERFACTUAL ENDPOINTS ---
 
 @api_router.post("/bias/audit/{opportunity_id}", response_model=schemas.GroupBiasAuditSummaryResponse)
-def execute_group_bias_audit(opportunity_id: int, db: Session = Depends(get_db)):
+def execute_group_bias_audit(
+    opportunity_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_role("industry", "academia", "admin"))
+):
     opp = db.query(models.Opportunity).filter(models.Opportunity.id == opportunity_id).first()
     if not opp:
         raise HTTPException(status_code=404, detail="Opportunity not found")
@@ -835,12 +1491,21 @@ def execute_group_bias_audit(opportunity_id: int, db: Session = Depends(get_db))
 
 
 @api_router.get("/bias/audit/{opportunity_id}", response_model=schemas.GroupBiasAuditSummaryResponse)
-def get_group_bias_audit_summary(opportunity_id: int, db: Session = Depends(get_db)):
+def get_group_bias_audit_summary(
+    opportunity_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_role("industry", "academia", "admin"))
+):
     return execute_group_bias_audit(opportunity_id, db)
 
 
 @api_router.get("/bias/candidate/{candidate_id}/{opportunity_id}", response_model=schemas.BiasAuditResponse)
-def get_candidate_bias_audit(candidate_id: int, opportunity_id: int, db: Session = Depends(get_db)):
+def get_candidate_bias_audit(
+    candidate_id: int,
+    opportunity_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_role("industry", "academia", "admin"))
+):
     candidate = db.query(models.Candidate).filter(models.Candidate.id == candidate_id).first()
     opp = db.query(models.Opportunity).filter(models.Opportunity.id == opportunity_id).first()
     if not candidate or not opp:
@@ -882,7 +1547,11 @@ def get_candidate_bias_audit(candidate_id: int, opportunity_id: int, db: Session
 
 
 @api_router.post("/bias/counterfactual", response_model=schemas.BiasAuditResponse)
-def run_counterfactual_analysis(payload: schemas.CounterfactualAuditPayload, db: Session = Depends(get_db)):
+def run_counterfactual_analysis(
+    payload: schemas.CounterfactualAuditPayload,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_role("industry", "academia", "admin"))
+):
     candidate = db.query(models.Candidate).filter(models.Candidate.id == payload.candidate_id).first()
     opp = db.query(models.Opportunity).filter(models.Opportunity.id == payload.opportunity_id).first()
     if not candidate or not opp:
@@ -985,10 +1654,12 @@ def run_counterfactual_analysis(payload: schemas.CounterfactualAuditPayload, db:
 # --- SIH PMIS ENDPOINTS ---
 
 @api_router.get("/candidates/{candidate_id}/eligibility", response_model=schemas.StudentEligibilityResponse)
-def get_student_eligibility(candidate_id: int, db: Session = Depends(get_db)):
-    candidate = db.query(models.Candidate).filter(models.Candidate.id == candidate_id).first()
-    if not candidate:
-        raise HTTPException(status_code=404, detail="Candidate/Student not found")
+def get_student_eligibility(
+    candidate_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_active_user)
+):
+    candidate = verify_candidate_access(candidate_id, current_user, db)
         
     from backend.app.services.eligibility import PMISEligibilityEngine
     eligible, passed, failed = PMISEligibilityEngine.precheck_candidate(candidate)
@@ -1009,10 +1680,13 @@ def get_student_eligibility(candidate_id: int, db: Session = Depends(get_db)):
 
 
 @api_router.get("/candidates/{candidate_id}/opportunities/{opportunity_id}/readiness", response_model=schemas.ReadinessSimulationResponse)
-def get_readiness_simulation(candidate_id: int, opportunity_id: int, db: Session = Depends(get_db)):
-    candidate = db.query(models.Candidate).filter(models.Candidate.id == candidate_id).first()
-    if not candidate:
-        raise HTTPException(status_code=404, detail="Candidate/Student not found")
+def get_readiness_simulation(
+    candidate_id: int,
+    opportunity_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_active_user)
+):
+    candidate = verify_candidate_access(candidate_id, current_user, db)
         
     opp = db.query(models.Opportunity).filter(models.Opportunity.id == opportunity_id).first()
     if not opp:
@@ -1090,8 +1764,13 @@ def get_readiness_simulation(candidate_id: int, opportunity_id: int, db: Session
 
 
 @api_router.get("/candidates/{candidate_id}/opportunities/{opportunity_id}/roadmap", response_model=schemas.UpskillingRoadmapResponse)
-def get_upskilling_roadmap(candidate_id: int, opportunity_id: int, db: Session = Depends(get_db)):
-    candidate = db.query(models.Candidate).filter(models.Candidate.id == candidate_id).first()
+def get_upskilling_roadmap(
+    candidate_id: int,
+    opportunity_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_active_user)
+):
+    candidate = verify_candidate_access(candidate_id, current_user, db)
     if not candidate:
         raise HTTPException(status_code=404, detail="Candidate/Student not found")
         
@@ -1155,11 +1834,13 @@ def _application_to_response(app: "models.Application") -> schemas.ApplicationRe
 
 
 @api_router.post("/applications", response_model=schemas.ApplicationResponse, status_code=201)
-def create_application(payload: schemas.ApplicationCreate, db: Session = Depends(get_db)):
+def create_application(
+    payload: schemas.ApplicationCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_role("student"))
+):
     """Student applies to an opportunity."""
-    candidate = db.query(models.Candidate).filter(models.Candidate.id == payload.candidate_id).first()
-    if not candidate:
-        raise HTTPException(status_code=404, detail="Candidate not found")
+    cand_for_user = verify_candidate_access(payload.candidate_id, current_user, db)
 
     opportunity = db.query(models.Opportunity).filter(models.Opportunity.id == payload.opportunity_id).first()
     if not opportunity:
@@ -1184,11 +1865,13 @@ def create_application(payload: schemas.ApplicationCreate, db: Session = Depends
 
 
 @api_router.get("/candidates/{candidate_id}/applications", response_model=List[schemas.ApplicationResponse])
-def get_candidate_applications(candidate_id: int, db: Session = Depends(get_db)):
+def get_candidate_applications(
+    candidate_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_active_user)
+):
     """Return all applications for a student."""
-    candidate = db.query(models.Candidate).filter(models.Candidate.id == candidate_id).first()
-    if not candidate:
-        raise HTTPException(status_code=404, detail="Candidate not found")
+    candidate = verify_candidate_access(candidate_id, current_user, db)
 
     applications = db.query(models.Application).filter(
         models.Application.candidate_id == candidate_id
@@ -1197,7 +1880,11 @@ def get_candidate_applications(candidate_id: int, db: Session = Depends(get_db))
 
 
 @api_router.get("/opportunities/{opportunity_id}/applications", response_model=List[schemas.ApplicationResponse])
-def get_opportunity_applications(opportunity_id: int, db: Session = Depends(get_db)):
+def get_opportunity_applications(
+    opportunity_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_role("industry", "academia", "admin"))
+):
     """Industry partner views applications for an opportunity."""
     opportunity = db.query(models.Opportunity).filter(models.Opportunity.id == opportunity_id).first()
     if not opportunity:
@@ -1210,7 +1897,12 @@ def get_opportunity_applications(opportunity_id: int, db: Session = Depends(get_
 
 
 @api_router.patch("/applications/{application_id}/status", response_model=schemas.ApplicationResponse)
-def update_application_status(application_id: int, payload: schemas.ApplicationStatusUpdate, db: Session = Depends(get_db)):
+def update_application_status(
+    application_id: int,
+    payload: schemas.ApplicationStatusUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_role("industry", "admin"))
+):
     """Industry partner updates application status with validated transitions."""
     application = db.query(models.Application).filter(models.Application.id == application_id).first()
     if not application:
@@ -1244,7 +1936,10 @@ def update_application_status(application_id: int, payload: schemas.ApplicationS
 # =============================================================================
 
 @api_router.get("/analytics/skill-demand", response_model=schemas.SkillDemandResponse)
-def get_skill_demand_analytics(db: Session = Depends(get_db)):
+def get_skill_demand_analytics(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_active_user)
+):
     """Aggregate skill demand across all industry opportunities."""
     from sqlalchemy import func
 
@@ -1293,8 +1988,17 @@ def get_skill_demand_analytics(db: Session = Depends(get_db)):
 
 
 @api_router.get("/analytics/institution-dashboard", response_model=schemas.InstitutionDashboardResponse)
-def get_institution_dashboard(db: Session = Depends(get_db)):
+def get_institution_dashboard(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_role("academia", "admin"))
+):
     """Institution-level aggregate dashboard with real database metrics."""
+    if isinstance(current_user, models.User):
+        if current_user.role == "student":
+            raise HTTPException(status_code=403, detail="Students cannot access institution dashboard")
+        if current_user.account_status != "active":
+            raise HTTPException(status_code=403, detail="Account pending verification or inactive.")
+
     from sqlalchemy import func
 
     total_students = db.query(func.count(models.Candidate.id)).scalar() or 0

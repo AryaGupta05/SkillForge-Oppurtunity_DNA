@@ -176,7 +176,7 @@ def test_readiness_simulation_math():
     opp.required_skills = [os_p, os_r]
     
     # Student has NO skills
-    student = models.Candidate(id=5, name="Novice Student")
+    student = models.Candidate(id=5, name="Novice Student", user_id=5)
     student.skills = []
     
     # Mock DB query
@@ -191,7 +191,8 @@ def test_readiness_simulation_math():
     db_mock.query = mock_query
     
     # Get readiness simulation
-    res = get_readiness_simulation(candidate_id=5, opportunity_id=10, db=db_mock)
+    mock_user = MagicMock(id=5, email="novice@student.com", role="student", account_status="active")
+    res = get_readiness_simulation(candidate_id=5, opportunity_id=10, db=db_mock, current_user=mock_user)
     
     # Assertions
     assert res.current_readiness_score == 0.0
@@ -212,7 +213,7 @@ def test_readiness_simulation_math():
     
     # 4. Selecting all missing skills produces a mathematically justified result (not automatically 100%)
     # Let's say student has Python with confidence = 0.5, but no React.
-    student_partial = models.Candidate(id=6, name="Partial Student")
+    student_partial = models.Candidate(id=6, name="Partial Student", user_id=6)
     cs_p = models.CandidateSkill(id=15, skill_id=1, confidence=0.5, proficiency="Intermediate", evidence_strength=2.0, skill=s_python)
     student_partial.skills = [cs_p]
     
@@ -225,7 +226,8 @@ def test_readiness_simulation_math():
         return q
     db_mock.query = mock_query_partial
     
-    res_partial = get_readiness_simulation(candidate_id=6, opportunity_id=10, db=db_mock)
+    mock_user_partial = MagicMock(id=6, email="partial@student.com", role="student", account_status="active")
+    res_partial = get_readiness_simulation(candidate_id=6, opportunity_id=10, db=db_mock, current_user=mock_user_partial)
     
     # Current score is 27.8% (0.5 / 1.8 * 100)
     assert round(res_partial.current_readiness_score, 1) == 27.8
@@ -238,7 +240,7 @@ def test_readiness_simulation_math():
     # If 1 gap (React):
     # React resources in catalog: fullstack open (60h) + Meta front-end (120h) + React project (20h) = 200h
     # 200 hours / 40 hours/month = 5.0 months.
-    roadmap_partial = get_upskilling_roadmap(candidate_id=6, opportunity_id=10, db=db_mock)
+    roadmap_partial = get_upskilling_roadmap(candidate_id=6, opportunity_id=10, db=db_mock, current_user=mock_user_partial)
     assert roadmap_partial.estimated_months_to_ready == 5.0
 
 

@@ -1,3 +1,139 @@
+export interface UserResponse {
+  id: number;
+  email: string;
+  full_name: string;
+  role: 'student' | 'industry' | 'academia' | 'admin';
+  is_active: boolean;
+  account_status?: 'pending_email_verification' | 'pending_verification' | 'active' | 'rejected' | 'suspended';
+  created_at: string;
+  candidate_id?: number;
+  company?: string;
+  institution?: string;
+  website?: string;
+  industry_sector?: string;
+  organization_type?: string;
+  designation?: string;
+  institution_type?: string;
+  official_domain?: string;
+  institution_identifier?: string;
+  graduation_year?: string;
+  college_id_or_enrollment_number?: string;
+  email_verified_at?: string;
+  verification_requested_at?: string;
+  verified_at?: string;
+  verified_by_user_id?: number;
+  rejection_reason?: string;
+  suspended_at?: string;
+}
+
+export interface VerifyEmailPayload {
+  email: string;
+  otp: string;
+}
+
+export interface ResendVerificationPayload {
+  email: string;
+}
+
+export interface VerificationQueueItem {
+  id: number;
+  email: string;
+  full_name: string;
+  role: 'industry' | 'academia';
+  account_status: string;
+  created_at: string;
+  verification_requested_at?: string;
+  company?: string;
+  website?: string;
+  industry_sector?: string;
+  organization_type?: string;
+  designation?: string;
+  institution?: string;
+  institution_type?: string;
+  official_domain?: string;
+  institution_identifier?: string;
+}
+
+export interface VerificationAuditLogItem {
+  id: number;
+  target_user_id: number;
+  admin_user_id: number;
+  action: 'approve' | 'reject' | 'suspend' | 'reactivate';
+  previous_status: string;
+  new_status: string;
+  reason?: string;
+  created_at: string;
+  admin_email?: string;
+  admin_full_name?: string;
+  target_email?: string;
+  target_full_name?: string;
+}
+
+export interface RejectUserPayload {
+  reason: string;
+}
+
+export interface SuspendUserPayload {
+  reason?: string;
+}
+
+export interface TokenResponse {
+  access_token: string;
+  token_type: string;
+  user: UserResponse;
+}
+
+export interface RegisterPayload {
+  email: string;
+  password: string;
+  full_name: string;
+  role: 'student' | 'industry' | 'academia';
+  institution?: string;
+  qualification_stream?: string;
+  highest_degree?: string;
+  location?: string;
+  preferred_sector?: string;
+  company?: string;
+}
+
+export interface StudentRegisterPayload {
+  full_name: string;
+  email: string;
+  password: string;
+  college_id_or_enrollment_number: string;
+  institution?: string;
+  degree?: string;
+  graduation_year?: string;
+}
+
+export interface IndustryRegisterPayload {
+  full_name: string;
+  email: string;
+  password: string;
+  company_name: string;
+  website?: string;
+  industry_sector?: string;
+  organization_type?: string;
+  designation?: string;
+}
+
+export interface AcademiaRegisterPayload {
+  full_name: string;
+  email: string;
+  password: string;
+  institution_name: string;
+  institution_type?: string;
+  website?: string;
+  official_domain?: string;
+  designation?: string;
+  institution_identifier?: string;
+}
+
+export interface LoginPayload {
+  email: string;
+  password: string;
+}
+
 export interface Skill {
   id: number;
   name: string;
@@ -31,6 +167,7 @@ export interface Evidence {
 
 export interface Candidate {
   id: number;
+  user_id?: number;
   name: string;
   email: string;
   location?: string;

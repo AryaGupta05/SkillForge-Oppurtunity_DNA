@@ -447,3 +447,115 @@ class InstitutionDashboardResponse(BaseModel):
     placement_application_stats: Optional[dict] = Field(default_factory=dict)
     avg_match_readiness: Optional[float] = 0.0
 
+
+# --- SIH26044: AUTHENTICATION & USER SCHEMAS ---
+class UserRegisterRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(..., min_length=6)
+    full_name: str = Field(..., min_length=2)
+    role: str = Field(..., description="student, industry, academia")
+    institution: Optional[str] = None
+    qualification_stream: Optional[str] = None
+    highest_degree: Optional[str] = None
+    location: Optional[str] = None
+    preferred_sector: Optional[str] = None
+    company: Optional[str] = None
+    college_id_or_enrollment_number: Optional[str] = None
+
+class StudentRegisterRequest(BaseModel):
+    full_name: str = Field(..., min_length=2)
+    email: EmailStr
+    password: str = Field(..., min_length=6)
+    college_id_or_enrollment_number: str = Field(..., min_length=2, description="College ID or Student Enrollment Number")
+    institution: Optional[str] = None
+    degree: Optional[str] = None
+    graduation_year: Optional[str] = None
+
+class IndustryRegisterRequest(BaseModel):
+    full_name: str = Field(..., min_length=2, description="Contact Person Full Name")
+    email: EmailStr = Field(..., description="Official Company Email")
+    password: str = Field(..., min_length=6)
+    company_name: str = Field(..., min_length=2)
+    website: Optional[str] = None
+    industry_sector: Optional[str] = None
+    organization_type: Optional[str] = None
+    designation: Optional[str] = None
+
+class AcademiaRegisterRequest(BaseModel):
+    full_name: str = Field(..., min_length=2, description="Authorized Person Full Name")
+    email: EmailStr = Field(..., description="Official Institutional Email")
+    password: str = Field(..., min_length=6)
+    institution_name: str = Field(..., min_length=2)
+    institution_type: Optional[str] = None
+    website: Optional[str] = None
+    official_domain: Optional[str] = None
+    designation: Optional[str] = None
+    institution_identifier: Optional[str] = None
+
+class UserLoginRequest(BaseModel):
+    email: EmailStr
+    password: str
+
+class VerifyEmailRequest(BaseModel):
+    email: EmailStr
+    otp: str = Field(..., min_length=6, max_length=6, description="6-digit verification code")
+
+class ResendVerificationRequest(BaseModel):
+    email: EmailStr
+
+class ApproveUserRequest(BaseModel):
+    notes: Optional[str] = None
+
+class RejectUserRequest(BaseModel):
+    rejection_reason: str = Field(..., min_length=3, description="Reason for rejecting verification")
+
+class SuspendUserRequest(BaseModel):
+    reason: Optional[str] = None
+
+class VerificationAuditLogResponse(BaseModel):
+    id: int
+    target_user_id: int
+    admin_user_id: int
+    action: str
+    previous_status: str
+    new_status: str
+    reason: Optional[str] = None
+    created_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
+class UserResponse(BaseModel):
+    id: int
+    email: str
+    full_name: str
+    role: str
+    is_active: bool
+    account_status: str = "active"
+    created_at: datetime
+    candidate_id: Optional[int] = None
+    company: Optional[str] = None
+    institution: Optional[str] = None
+    website: Optional[str] = None
+    industry_sector: Optional[str] = None
+    organization_type: Optional[str] = None
+    designation: Optional[str] = None
+    institution_type: Optional[str] = None
+    official_domain: Optional[str] = None
+    institution_identifier: Optional[str] = None
+    graduation_year: Optional[str] = None
+    college_id_or_enrollment_number: Optional[str] = None
+    
+    # Verification & Audit Metadata
+    email_verified_at: Optional[datetime] = None
+    verification_requested_at: Optional[datetime] = None
+    verified_at: Optional[datetime] = None
+    verified_by_user_id: Optional[int] = None
+    rejection_reason: Optional[str] = None
+    suspended_at: Optional[datetime] = None
+    model_config = ConfigDict(from_attributes=True)
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: UserResponse
+
+
